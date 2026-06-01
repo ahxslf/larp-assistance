@@ -17,7 +17,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        pass  # log spam'i engelle
+        pass
 
 def run_http_server():
     server = HTTPServer(("0.0.0.0", 10000), HealthHandler)
@@ -29,6 +29,17 @@ intents.members = True
 intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+def is_staff(ctx: commands.Context) -> bool:
+    staff_role = ctx.guild.get_role(STAFF_ROLE_ID)
+    return staff_role in ctx.author.roles
+
+def is_ticket_channel(ctx: commands.Context) -> bool:
+    return (
+        ctx.channel.category is not None
+        and ctx.channel.category.id == TICKET_CATEGORY_ID
+        and ctx.channel.name.startswith("support-")
+    )
 
 @bot.event
 async def on_ready():
@@ -63,7 +74,6 @@ async def on_message(message: discord.Message):
     channel_id = message.channel.id
     if not is_active_ticket(channel_id):
         return
-
     ticket = active_tickets.get(channel_id)
     if not ticket:
         return
@@ -74,11 +84,17 @@ async def on_message(message: discord.Message):
 
     await handle_followup_message(message, message.guild)
 
+# ───────────────────────────────────────────
+# KOMUTLAR
+# ───────────────────────────────────────────
+
 @bot.command(name="stop")
 async def stop_command(ctx: commands.Context):
-    staff_role = ctx.guild.get_role(STAFF_ROLE_ID)
-    if staff_role not in ctx.author.roles:
+    if not is_staff(ctx):
         await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
         return
     if not is_active_ticket(ctx.channel.id):
         await ctx.send("❌ Not an active ticket.")
@@ -86,8 +102,77 @@ async def stop_command(ctx: commands.Context):
     stop_ticket(ctx.channel.id)
     await ctx.send("🛑 LARP | Assistance disabled.")
 
+@bot.command(name="claim")
+async def claim_command(ctx: commands.Context):
+    if not is_staff(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+    # Kanala staff'ın adını tag olarak yaz, konuya ekle
+    await ctx.channel.edit(topic=f"Claimed by {ctx.author.display_name}")
+    await ctx.send(f"✅ Ticket claimed by {ctx.author.mention}.")
+
+@bot.command(name="unclaim")
+async def unclaim_command(ctx: commands.Context):
+    if not is_staff(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+    await ctx.channel.edit(topic=None)
+    await ctx.send("✅ Ticket unclaimed.")
+
+@bot.command(name="rename")
+async def rename_command(ctx: commands.Context, *, new_name: str = None):
+    if not is_staff(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+    if not new_name:
+        await ctx.send("❌ Usage: `!rename <new name>`")
+        return
+    # Discord kanal isimleri boşluk içeremez, tire yap
+    safe_name = new_name.lower().replace(" ", "-")
+    await ctx.channel.edit(name=f"support-{safe_name}")
+    await ctx.send(f"✅ Channel renamed to `support-{safe_name}`.")
+
+@bot.command(name="remove")
+async def remove_command(ctx: commands.Context, member: discord.Member = None):
+    if not is_staff(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+    if not member:
+        await ctx.send("❌ Usage: `!remove @user`")
+        return
+    await ctx.channel.set_permissions(member, overwrite=None)
+    await ctx.send(f"✅ {member.mention} removed from this ticket.")
+
+@bot.command(name="add")
+async def add_command(ctx: commands.Context, member: discord.Member = None):
+    if not is_staff(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+    if not member:
+        await ctx.send("❌ Usage: `!add @user`")
+        return
+    await ctx.channel.set_permissions(member,
+        read_messages=True,
+        send_messages=True
+    )
+    await ctx.send(f"✅ {member.mention} added to this ticket.")
+
 if __name__ == "__main__":
-    # HTTP server'ı ayrı thread'de başlat
     t = threading.Thread(target=run_http_server, daemon=True)
     t.start()
     print("🌐 HTTP health server started on port 10000")
