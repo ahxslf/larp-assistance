@@ -13,13 +13,8 @@ class AIHandler:
     async def get_response(self, user_message: str, history: list[dict]) -> str:
         try:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
             for msg in history[:-1]:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-
+                messages.append({"role": msg["role"], "content": msg["content"]})
             messages.append({"role": "user", "content": user_message})
 
             response = await client.chat.completions.create(
@@ -41,7 +36,6 @@ class AIHandler:
                 f"{msg['role'].upper()}: {msg['content']}"
                 for msg in conversation
             ])
-
             prompt = SUMMARY_PROMPT.format(conversation=conversation_text)
 
             response = await client.chat.completions.create(
