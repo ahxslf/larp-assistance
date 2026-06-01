@@ -1,5 +1,7 @@
 import discord
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord.ext import commands
 from config import DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID
 from handlers.ticket_handler import (
@@ -8,6 +10,19 @@ from handlers.ticket_handler import (
     active_tickets
 )
 
+# Render web service için minimal HTTP server
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # log spam'i engelle
+
+def run_http_server():
+    server = HTTPServer(("0.0.0.0", 10000), HealthHandler)
+    server.serve_forever()
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -15,12 +30,10 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 @bot.event
 async def on_ready():
     print(f"✅ Bot online: {bot.user}")
     print(f"📂 Watching category ID: {TICKET_CATEGORY_ID}")
-
 
 @bot.event
 async def on_guild_channel_create(channel):
@@ -30,15 +43,12 @@ async def on_guild_channel_create(channel):
         return
     if not channel.name.startswith("support-"):
         return
-
     print(f"[+] Ticket detected: #{channel.name}")
     asyncio.create_task(handle_new_ticket(bot, channel, channel.guild))
-
 
 @bot.event
 async def on_message(message: discord.Message):
     await bot.process_commands(message)
-
     if message.author.bot:
         return
     if not message.guild:
@@ -51,22 +61,18 @@ async def on_message(message: discord.Message):
         return
 
     channel_id = message.channel.id
-
     if not is_active_ticket(channel_id):
         return
 
     ticket = active_tickets.get(channel_id)
     if not ticket:
         return
-
     if ticket.get("waiting", False):
         return
-
     if not is_first_message_done(channel_id):
         return
 
     await handle_followup_message(message, message.guild)
-
 
 @bot.command(name="stop")
 async def stop_command(ctx: commands.Context):
@@ -74,14 +80,15 @@ async def stop_command(ctx: commands.Context):
     if staff_role not in ctx.author.roles:
         await ctx.send("❌ You don't have permission.")
         return
-
     if not is_active_ticket(ctx.channel.id):
         await ctx.send("❌ Not an active ticket.")
         return
-
     stop_ticket(ctx.channel.id)
     await ctx.send("🛑 LARP | Assistance disabled.")
 
-
 if __name__ == "__main__":
+    # HTTP server'ı ayrı thread'de başlat
+    t = threading.Thread(target=run_http_server, daemon=True)
+    t.start()
+    print("🌐 HTTP health server started on port 10000")
     bot.run(DISCORD_TOKEN)
