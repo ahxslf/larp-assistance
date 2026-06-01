@@ -28,7 +28,6 @@ def find_member_by_username(guild: discord.Guild, username: str) -> discord.Memb
     return None
 
 
-# ✅ BOT PARAMETRESİ EKLENDİ
 async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Guild):
     channel_id = channel.id
     username = extract_username(channel.name)
@@ -77,12 +76,9 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
 
     first_msg = None
 
-    # ✅ BOT PARAMETRESİ KULLANILIYOR
     try:
         first_msg = await bot.wait_for(
-            "message",
-            check=check,
-            timeout=USER_RESPONSE_WAIT
+            "message", check=check, timeout=USER_RESPONSE_WAIT
         )
 
     except asyncio.TimeoutError:
@@ -98,9 +94,7 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
 
         try:
             first_msg = await bot.wait_for(
-                "message",
-                check=check,
-                timeout=None
+                "message", check=check, timeout=None
             )
         except Exception as e:
             print(f"[Ticket] Wait mode error: {e}")
@@ -111,13 +105,11 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
 
     active_tickets[channel_id]["waiting"] = False
 
-    # Konuşmaya ekle
     active_tickets[channel_id]["conversation"].append({
         "role": "user",
         "content": first_msg.content
     })
 
-    # AI yanıtı üret
     async with channel.typing():
         ai_response = await ai.get_response(
             first_msg.content,
@@ -211,12 +203,7 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
         [m for m in ticket["conversation"] if m["role"] == "user"]
     )
 
-    await send_summary(
-        message.channel,
-        guild,
-        channel_id,
-        version=user_message_count
-    )
+    await send_summary(message.channel, guild, channel_id, version=user_message_count)
 
 
 def stop_ticket(channel_id: int) -> bool:
