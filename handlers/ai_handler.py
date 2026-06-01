@@ -1,29 +1,33 @@
 import asyncio
-import google.generativeai as genai
-from config import GEMINI_API_KEY, SYSTEM_PROMPT, SUMMARY_PROMPT
+from openai import AsyncOpenAI
+from config import QWEN_API_KEY, SYSTEM_PROMPT, SUMMARY_PROMPT
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = AsyncOpenAI(
+    api_key=QWEN_API_KEY,
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+)
 
 class AIHandler:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-2.5-flash")
+        self.model = "llama3.3-70b-instruct"
 
     async def get_response(self, user_message: str, history: list[dict]) -> str:
         try:
-            conversation_text = "\n".join([
-                f"{msg['role'].upper()}: {msg['content']}"
-                for msg in history
-            ])
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-            prompt = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"Conversation so far:\n{conversation_text}\n\n"
-                f"User: {user_message}\n\n"
-                f"Assistant:"
+            for msg in history[:-1]:  # son mesajı (user_message) zaten alta ekliyoruz
+                messages.append({
+                    "role": msg["role"] if msg["role"] != "assistant" else "assistant",
+                    "content": msg["content"]
+                })
+
+            messages.append({"role": "user", "content": user_message})
+
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
             )
-
-            response = await asyncio.to_thread(self.model.generate_content, prompt)
-            return response.text
+            return response.choices[0].message.content
 
         except Exception as e:
             print(f"[AI Error] {e}")
@@ -41,8 +45,13 @@ class AIHandler:
 
             prompt = SUMMARY_PROMPT.format(conversation=conversation_text)
 
-            response = await asyncio.to_thread(self.model.generate_content, prompt)
-            return response.text
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            return response.choices[0].message.content
 
         except Exception as e:
             print(f"[Summary Error] {e}")
