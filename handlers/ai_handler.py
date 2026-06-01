@@ -1,15 +1,14 @@
-import asyncio
 from openai import AsyncOpenAI
-from config import QWEN_API_KEY, SYSTEM_PROMPT, SUMMARY_PROMPT
+from config import GROQ_API_KEY, SYSTEM_PROMPT, SUMMARY_PROMPT
 
 client = AsyncOpenAI(
-    api_key=QWEN_API_KEY,
-    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1",
 )
 
 class AIHandler:
     def __init__(self):
-        self.model = "llama3.3-70b-instruct"
+        self.model = "llama-3.3-70b-versatile"
 
     async def get_response(self, user_message: str, history: list[dict]) -> str:
         try:
