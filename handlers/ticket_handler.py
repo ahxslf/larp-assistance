@@ -10,11 +10,9 @@ ai = AIHandler()
 
 active_tickets: dict[int, dict] = {}
 
-
 def extract_username(channel_name: str) -> str:
     parts = channel_name.split("-", 1)
     return parts[1] if len(parts) > 1 else channel_name
-
 
 def find_member_by_username(guild: discord.Guild, username: str) -> discord.Member | None:
     username_lower = username.lower()
@@ -26,7 +24,6 @@ def find_member_by_username(guild: discord.Guild, username: str) -> discord.Memb
         if member.nick and member.nick.lower() == username_lower:
             return member
     return None
-
 
 async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Guild):
     channel_id = channel.id
@@ -124,11 +121,8 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
     })
 
     active_tickets[channel_id]["first_message_done"] = True
-
     print(f"[Ticket] First exchange done in #{channel.name}")
-
-    await send_summary(channel, guild, channel_id, version=1)
-
+    # ⬆️ Summary burada YOK — kullanıcı daha fazla bilgi vermeden summary yapılmaz
 
 async def send_summary(
     channel: discord.TextChannel,
@@ -164,7 +158,6 @@ async def send_summary(
         except discord.NotFound:
             summary_msg = await channel.send(full_message)
             active_tickets[channel_id]["summary_msg"] = summary_msg
-
 
 async def handle_followup_message(message: discord.Message, guild: discord.Guild):
     channel_id = message.channel.id
@@ -203,8 +196,9 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
         [m for m in ticket["conversation"] if m["role"] == "user"]
     )
 
-    await send_summary(message.channel, guild, channel_id, version=user_message_count)
-
+    # ✅ Summary: kullanıcı en az 2 mesaj gönderdikten sonra başla, sonra her mesajda güncelle
+    if user_message_count >= 2:
+        await send_summary(message.channel, guild, channel_id, version=user_message_count)
 
 def stop_ticket(channel_id: int) -> bool:
     if channel_id in active_tickets:
@@ -212,10 +206,8 @@ def stop_ticket(channel_id: int) -> bool:
         return True
     return False
 
-
 def is_active_ticket(channel_id: int) -> bool:
     return channel_id in active_tickets and not active_tickets[channel_id]["stopped"]
-
 
 def is_first_message_done(channel_id: int) -> bool:
     ticket = active_tickets.get(channel_id)
