@@ -5,7 +5,7 @@ load_dotenv()
 
 # Bot Settings
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")   # ← GEMINI_API_KEY yerine bu
 BOT_NAME = "LARP | Assistance"
 
 # Discord IDs
@@ -15,8 +15,8 @@ STAFF_PING_ID = 1508804635094286455
 TICKETY_BOT_ID = 718493970652594217
 
 # Timing
-INITIAL_WAIT = 5         # Wait after channel creation (seconds)
-USER_RESPONSE_WAIT = 30  # Wait for first user message (seconds)
+INITIAL_WAIT = 5
+USER_RESPONSE_WAIT = 30
 
 # AI System Prompt
 SYSTEM_PROMPT = """You are a support assistant named "LARP | Assistance" for a Discord server.
@@ -30,10 +30,13 @@ Your rules:
 - If you cannot solve the issue, let them know staff will assist them"""
 
 SUMMARY_PROMPT = """Based on the support conversation below, write a short summary for the staff team.
+
 Use ONLY English. Use this exact format:
 
 **📋 Issue:** (one line description of the problem)
+
 **📝 Details:** (2-3 key points from the conversation)
+
 **⚡ Priority:** Low / Medium / High
 
 Conversation:
