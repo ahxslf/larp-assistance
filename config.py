@@ -5,7 +5,7 @@ load_dotenv()
 
 # Bot Settings
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")   # ← GEMINI_API_KEY yerine bu
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 BOT_NAME = "LARP | Assistance"
 
 # Discord IDs
