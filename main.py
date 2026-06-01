@@ -1,35 +1,25 @@
 import discord
 import asyncio
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord.ext import commands
-from config import (
-    DISCORD_TOKEN, TICKET_CATEGORY_ID,
-    STAFF_ROLE_ID
-)
+from config import DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID
 from handlers.ticket_handler import (
     handle_new_ticket, handle_followup_message,
     stop_ticket, is_active_ticket, is_first_message_done,
     active_tickets
 )
 
-# ✅ Önce intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-# ✅ Sonra bot tanımı
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ─────────────────────────────
-# ✅ DISCORD EVENTS
-# ─────────────────────────────
 
 @bot.event
 async def on_ready():
     print(f"✅ Bot online: {bot.user}")
-    print(f"📂 Watching category: {TICKET_CATEGORY_ID}")
+    print(f"📂 Watching category ID: {TICKET_CATEGORY_ID}")
 
 
 @bot.event
@@ -42,7 +32,7 @@ async def on_guild_channel_create(channel):
         return
 
     print(f"[+] Ticket detected: #{channel.name}")
-    asyncio.create_task(handle_new_ticket(channel, channel.guild))
+    asyncio.create_task(handle_new_ticket(bot, channel, channel.guild))
 
 
 @bot.event
@@ -90,7 +80,7 @@ async def stop_command(ctx: commands.Context):
         return
 
     stop_ticket(ctx.channel.id)
-    await ctx.send("🛑 LARP | Assistance disabled in this channel.")
+    await ctx.send("🛑 LARP | Assistance disabled.")
 
 
 if __name__ == "__main__":
