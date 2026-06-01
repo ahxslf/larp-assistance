@@ -6,7 +6,8 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 class AIHandler:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
+        # ✅ Model güncellendi: gemini-2.0-flash-exp (en yeni ücretsiz model)
+        self.model = genai.GenerativeModel("gemini-2.0-flash-exp")
 
     async def get_response(self, user_message: str, history: list[dict]) -> str:
         """Generate AI response to user message"""
