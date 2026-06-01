@@ -2,40 +2,35 @@ import discord
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from discord.ext import commands
-from config import (
-    DISCORD_TOKEN, TICKET_CATEGORY_ID,
-    STAFF_ROLE_ID
-)
-from handlers.ticket_handler import (
-    handle_new_ticket, handle_followup_message,
-    stop_ticket, is_active_ticket, is_first_message_done,
-    active_tickets
-)
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-# ── Health check server (UptimeRobot için) ──
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+
+    def _send_ok(self):
+        body = b"OK"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"OK")
+        return body
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "/healthz":
+            body = self._send_ok()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
+        if self.path == "/" or self.path == "/healthz":
+            self._send_ok()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # HTTP loglarını sustur
+        return
+
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
