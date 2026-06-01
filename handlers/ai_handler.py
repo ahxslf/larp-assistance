@@ -15,9 +15,9 @@ class AIHandler:
         try:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-            for msg in history[:-1]:  # son mesajı (user_message) zaten alta ekliyoruz
+            for msg in history[:-1]:
                 messages.append({
-                    "role": msg["role"] if msg["role"] != "assistant" else "assistant",
+                    "role": msg["role"],
                     "content": msg["content"]
                 })
 
@@ -47,9 +47,7 @@ class AIHandler:
 
             response = await client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
             )
             return response.choices[0].message.content
 
