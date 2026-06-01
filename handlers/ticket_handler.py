@@ -28,14 +28,15 @@ def find_member_by_username(guild: discord.Guild, username: str) -> discord.Memb
     return None
 
 
-async def handle_new_ticket(channel: discord.TextChannel, guild: discord.Guild):
+# ✅ BOT PARAMETRESİ EKLENDİ
+async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Guild):
     channel_id = channel.id
     username = extract_username(channel.name)
 
     active_tickets[channel_id] = {
         "stopped": False,
         "waiting": False,
-        "first_message_done": False,  # İlk mesaj alındı mı?
+        "first_message_done": False,
         "conversation": [],
         "summary_msg": None,
         "user": None,
@@ -52,10 +53,8 @@ async def handle_new_ticket(channel: discord.TextChannel, guild: discord.Guild):
     active_tickets[channel_id]["user"] = member
 
     if member:
-        print(f"[Ticket] Matched member: {member} (ID: {member.id})")
         ping_text = member.mention
     else:
-        print(f"[Ticket] No member found for: '{username}'")
         ping_text = f"**{username}**"
 
     await channel.send(
@@ -76,26 +75,33 @@ async def handle_new_ticket(channel: discord.TextChannel, guild: discord.Guild):
             return m.author.id == member.id
         return True
 
-    # 30 saniye bekle
     first_msg = None
+
+    # ✅ BOT PARAMETRESİ KULLANILIYOR
     try:
-        from main import bot
-        first_msg = await bot.wait_for("message", check=check, timeout=USER_RESPONSE_WAIT)
+        first_msg = await bot.wait_for(
+            "message",
+            check=check,
+            timeout=USER_RESPONSE_WAIT
+        )
 
     except asyncio.TimeoutError:
         if active_tickets[channel_id]["stopped"]:
             return
 
         active_tickets[channel_id]["waiting"] = True
+
         await channel.send(
             f"⏳ **{BOT_NAME}:** No worries, take your time! "
             f"I'm still here whenever you're ready."
         )
-        print(f"[Ticket] #{channel.name} → wait mode")
 
         try:
-            from main import bot
-            first_msg = await bot.wait_for("message", check=check, timeout=None)
+            first_msg = await bot.wait_for(
+                "message",
+                check=check,
+                timeout=None
+            )
         except Exception as e:
             print(f"[Ticket] Wait mode error: {e}")
             return
@@ -125,12 +131,10 @@ async def handle_new_ticket(channel: discord.TextChannel, guild: discord.Guild):
         "content": ai_response
     })
 
-    # ✅ İlk mesaj tamamlandı, followup'lara izin ver
     active_tickets[channel_id]["first_message_done"] = True
 
     print(f"[Ticket] First exchange done in #{channel.name}")
 
-    # Summary gönder
     await send_summary(channel, guild, channel_id, version=1)
 
 
@@ -162,11 +166,9 @@ async def send_summary(
     if existing_summary is None:
         summary_msg = await channel.send(full_message)
         active_tickets[channel_id]["summary_msg"] = summary_msg
-        print(f"[Summary] v{version} sent in #{channel.name}")
     else:
         try:
             await existing_summary.edit(content=full_message)
-            print(f"[Summary] v{version} updated in #{channel.name}")
         except discord.NotFound:
             summary_msg = await channel.send(full_message)
             active_tickets[channel_id]["summary_msg"] = summary_msg
@@ -177,7 +179,6 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
     ticket = active_tickets.get(channel_id)
 
     if not ticket:
-        print(f"[Followup] No ticket found for #{message.channel.name}")
         return
     if ticket["stopped"]:
         return
@@ -186,10 +187,7 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
 
     user = ticket.get("user")
     if user and message.author.id != user.id:
-        print(f"[Followup] Message from wrong user, ignoring")
         return
-
-    print(f"[Followup] Processing message in #{message.channel.name}: {message.content[:50]}")
 
     ticket["conversation"].append({
         "role": "user",
@@ -209,8 +207,16 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
         "content": ai_response
     })
 
-    user_message_count = len([m for m in ticket["conversation"] if m["role"] == "user"])
-    await send_summary(message.channel, guild, channel_id, version=user_message_count)
+    user_message_count = len(
+        [m for m in ticket["conversation"] if m["role"] == "user"]
+    )
+
+    await send_summary(
+        message.channel,
+        guild,
+        channel_id,
+        version=user_message_count
+    )
 
 
 def stop_ticket(channel_id: int) -> bool:
