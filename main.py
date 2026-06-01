@@ -23,46 +23,6 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ─────────────────────────────
-# ✅ HEALTH SERVER
-# ─────────────────────────────
-
-class HealthHandler(BaseHTTPRequestHandler):
-
-    def _send_ok(self):
-        body = b"OK"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        return body
-
-    def do_GET(self):
-        if self.path in ["/", "/healthz"]:
-            body = self._send_ok()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_HEAD(self):
-        if self.path in ["/", "/healthz"]:
-            self._send_ok()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
-    server.serve_forever()
-
-threading.Thread(target=run_health_server, daemon=True).start()
-print("🌐 Health check server started on port 8080")
-
-# ─────────────────────────────
 # ✅ DISCORD EVENTS
 # ─────────────────────────────
 
