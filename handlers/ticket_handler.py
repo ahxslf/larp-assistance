@@ -10,6 +10,9 @@ ai = AIHandler()
 
 active_tickets: dict[int, dict] = {}
 
+# Komut prefixleri — bu ile başlayan mesajlar AI'ya gitmesin
+COMMAND_PREFIXES = ("!", "s!")
+
 def extract_username(channel_name: str) -> str:
     parts = channel_name.split("-", 1)
     return parts[1] if len(parts) > 1 else channel_name
@@ -24,6 +27,13 @@ def find_member_by_username(guild: discord.Guild, username: str) -> discord.Memb
         if member.nick and member.nick.lower() == username_lower:
             return member
     return None
+
+def is_command_message(content: str) -> bool:
+    """Mesaj bir komutsa True döner — AI buna cevap vermez."""
+    for prefix in COMMAND_PREFIXES:
+        if content.startswith(prefix):
+            return True
+    return False
 
 async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Guild):
     channel_id = channel.id
@@ -66,6 +76,9 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
         if m.author.bot:
             return False
         if m.channel.id != channel_id:
+            return False
+        # Komut mesajlarını yoksay
+        if is_command_message(m.content):
             return False
         if member:
             return m.author.id == member.id
@@ -122,7 +135,6 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
 
     active_tickets[channel_id]["first_message_done"] = True
     print(f"[Ticket] First exchange done in #{channel.name}")
-    # ⬆️ Summary burada YOK — kullanıcı daha fazla bilgi vermeden summary yapılmaz
 
 async def send_summary(
     channel: discord.TextChannel,
@@ -170,6 +182,11 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
     if message.author.bot:
         return
 
+    # Komut mesajlarını yoksay
+    if is_command_message(message.content):
+        return
+
+    # Sadece ticket sahibi konuşabilir
     user = ticket.get("user")
     if user and message.author.id != user.id:
         return
@@ -196,7 +213,7 @@ async def handle_followup_message(message: discord.Message, guild: discord.Guild
         [m for m in ticket["conversation"] if m["role"] == "user"]
     )
 
-    # ✅ Summary: kullanıcı en az 2 mesaj gönderdikten sonra başla, sonra her mesajda güncelle
+    # Summary: kullanıcı en az 2 mesaj gönderdikten sonra
     if user_message_count >= 2:
         await send_summary(message.channel, guild, channel_id, version=user_message_count)
 
