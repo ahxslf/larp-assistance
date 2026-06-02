@@ -49,6 +49,26 @@ async def get_prefix(bot, message):
 bot = commands.Bot(command_prefix=get_prefix, intents=intents)
 
 # ───────────────────────────────────────────
+# FASTPASS ROLE DATA
+# ───────────────────────────────────────────
+
+FASTPASS_ROLES = [
+    ("Lead Administrator",   ROLE_LEAD_ADMIN),
+    ("Senior Administrator", ROLE_SENIOR_ADMIN),
+    ("Administrator",        ROLE_ADMIN),
+    ("Junior Administrator", ROLE_JUNIOR_ADMIN),
+    ("Trial Administrator",  ROLE_TRIAL_ADMIN),
+    ("Lead Moderator",       ROLE_LEAD_MOD),
+    ("Senior Moderator",     ROLE_SENIOR_MOD),
+    ("Moderator",            ROLE_MOD),
+    ("Junior Moderator",     ROLE_JUNIOR_MOD),
+    ("Trial Moderator",      ROLE_TRIAL_MOD),
+]
+
+ADMIN_ROLE_IDS = {ROLE_LEAD_ADMIN, ROLE_SENIOR_ADMIN, ROLE_ADMIN, ROLE_JUNIOR_ADMIN, ROLE_TRIAL_ADMIN}
+MOD_ROLE_IDS   = {ROLE_LEAD_MOD, ROLE_SENIOR_MOD, ROLE_MOD, ROLE_JUNIOR_MOD, ROLE_TRIAL_MOD}
+
+# ───────────────────────────────────────────
 # HELPERS
 # ───────────────────────────────────────────
 
@@ -72,29 +92,148 @@ async def send_transcript(channel: discord.TextChannel, guild: discord.Guild, cl
     if not transcript_channel:
         print(f"[Transcript] Channel {TRANSCRIPT_CHANNEL_ID} not found!")
         return
-
     messages = []
     async for msg in channel.history(limit=500, oldest_first=True):
         timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
         content = msg.content or "(no text content)"
         messages.append(f"[{timestamp}] {msg.author.display_name}: {content}")
-
     transcript_text = "\n".join(messages) if messages else "(No messages)"
-
     embed = discord.Embed(
         title=f"📋 Ticket Transcript — #{channel.name}",
         color=discord.Color.blurple(),
         description=f"**Closed by:** {closed_by.mention}\n**Channel:** #{channel.name}"
     )
     embed.set_footer(text=f"Ticket closed • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-
     file = discord.File(
         fp=io.BytesIO(transcript_text.encode("utf-8")),
         filename=f"transcript-{channel.name}.txt"
     )
-
     await transcript_channel.send(embed=embed, file=file)
     print(f"[Transcript] Sent for #{channel.name}")
+
+async def assign_roles_and_notify(
+    guild: discord.Guild,
+    applicant: discord.Member,
+    role_id: int,
+    role_name: str,
+    promoted_by: discord.Member,
+    notify_channel: discord.TextChannel
+):
+    """Rol ver, ekstra rolleri ekle, kanala bildir."""
+    roles_to_add = [role_id]
+    if role_id in ADMIN_ROLE_IDS:
+        roles_to_add.append(ROLE_ADMINISTRATION_TEAM)
+        roles_to_add.append(ROLE_STAFF_TEAM)
+    elif role_id in MOD_ROLE_IDS:
+        roles_to_add.append(ROLE_MODERATION_TEAM)
+        roles_to_add.append(ROLE_STAFF_TEAM)
+
+    added = []
+    for rid in roles_to_add:
+        role_obj = guild.get_role(rid)
+        if role_obj and role_obj not in applicant.roles:
+            await applicant.add_roles(role_obj, reason=f"Fast Pass/Transfer by {promoted_by.display_name}")
+            added.append(role_obj.name)
+
+    added_str = ", ".join(f"**{r}**" for r in added) if added else "*(already had all roles)*"
+
+    try:
+        await notify_channel.send(
+            f"🎉 {applicant.mention} Congratulations! Your application has been **approved**.\n"
+            f"You have been promoted to **{role_name}**!\n"
+            f"Roles assigned: {added_str}"
+        )
+    except Exception:
+        pass
+
+    return added_str
+
+def make_promote_view(applicant: discord.Member, notify_channel: discord.TextChannel, foundership_role_id: int):
+    """Foundership-only Promote/Deny view döndürür."""
+
+    class PromoteView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(label="✅ Promote", style=discord.ButtonStyle.success, emoji="⬆️")
+        async def promote(self, interaction: discord.Interaction, button: discord.ui.Button):
+            fp_role = interaction.guild.get_role(foundership_role_id)
+            if fp_role not in interaction.user.roles:
+                await interaction.response.send_message(
+                    "❌ Only **Foundership Team** can promote applicants.", ephemeral=True
+                )
+                return
+
+            class RoleSelect(discord.ui.Select):
+                def __init__(self):
+                    options = [
+                        discord.SelectOption(label=name, value=str(role_id))
+                        for name, role_id in FASTPASS_ROLES
+                    ]
+                    super().__init__(placeholder="Select a role to assign...", options=options)
+
+                async def callback(self, select_interaction: discord.Interaction):
+                    selected_id = int(self.values[0])
+                    selected_name = next(n for n, rid in FASTPASS_ROLES if rid == selected_id)
+
+                    added_str = await assign_roles_and_notify(
+                        select_interaction.guild, applicant, selected_id,
+                        selected_name, select_interaction.user, notify_channel
+                    )
+
+                    # Ana mesajdaki butonları devre dışı bırak
+                    outer = self.view
+                    if hasattr(outer, "_parent_view"):
+                        for item in outer._parent_view.children:
+                            item.disabled = True
+                        try:
+                            await outer._parent_view.message.edit(view=outer._parent_view)
+                        except Exception:
+                            pass
+
+                    await select_interaction.response.send_message(
+                        f"✅ **{applicant.display_name}** promoted to **{selected_name}**!\n"
+                        f"Roles assigned: {added_str}",
+                        ephemeral=False
+                    )
+
+            class RoleSelectView(discord.ui.View):
+                def __init__(self, parent_view):
+                    super().__init__(timeout=120)
+                    self._parent_view = parent_view
+                    self.add_item(RoleSelect())
+
+            await interaction.response.send_message(
+                f"Select the role to assign to **{applicant.display_name}**:",
+                view=RoleSelectView(self),
+                ephemeral=True
+            )
+
+        @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, emoji="✖️")
+        async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+            fp_role = interaction.guild.get_role(foundership_role_id)
+            if fp_role not in interaction.user.roles:
+                await interaction.response.send_message(
+                    "❌ Only **Foundership Team** can deny applications.", ephemeral=True
+                )
+                return
+
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+
+            await interaction.response.send_message(
+                f"❌ Application from **{applicant.display_name}** has been **denied**.",
+                ephemeral=False
+            )
+            try:
+                await notify_channel.send(
+                    f"❌ {applicant.mention} Unfortunately, your application has been **denied**."
+                )
+            except Exception:
+                pass
+
+    return PromoteView()
 
 # ───────────────────────────────────────────
 # EVENTS
@@ -199,7 +338,6 @@ async def close_command(ctx: commands.Context):
         "The ticket will be **deleted in 30 seconds** after confirmation.",
         view=view
     )
-
     await view.wait()
 
     if view.confirmed is None:
@@ -301,192 +439,162 @@ async def add_command(ctx: commands.Context, member: discord.Member = None):
     await ctx.send(f"✅ {member.mention} added to this ticket.")
 
 # ───────────────────────────────────────────
+# !cmds
+# ───────────────────────────────────────────
+
+@bot.command(name="cmds")
+async def cmds_command(ctx: commands.Context):
+    embed = discord.Embed(
+        title="📖 LARP | Assistance — Commands",
+        color=discord.Color.blurple()
+    )
+
+    embed.add_field(
+        name="🎫 Ticket Commands (`!`)",
+        value=(
+            "`!stop` — Disable AI assistance in this ticket\n"
+            "`!close` — Close & delete ticket (with confirmation + transcript)\n"
+            "`!claim` — Claim this ticket\n"
+            "`!unclaim` — Unclaim this ticket\n"
+            "`!rename <name>` — Rename the ticket channel\n"
+            "`!add @user` — Add a user to this ticket\n"
+            "`!remove @user` — Remove a user from this ticket"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚡ Staff Commands (`s!`)",
+        value=(
+            "`s!fastpass` — Submit a Fast Pass application *(open to all)*\n"
+            "`s!transfer` — Submit a Transfer / Retirement application *(open to all)*\n"
+            "`s!partnership` — Submit a Partnership application *(open to all)*\n"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔒 Foundership Team Only",
+        value=(
+            "Promote/Deny buttons on `s!fastpass`, `s!transfer`, and `s!partnership` submissions\n"
+            "are restricted to **Foundership Team** only."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="LARP | Assistance • Los Angeles Roleplay")
+    await ctx.send(embed=embed)
+
+# ───────────────────────────────────────────
 # s!fastpass
 # ───────────────────────────────────────────
 
-FASTPASS_ROLES = [
-    ("Lead Administrator",   ROLE_LEAD_ADMIN),
-    ("Senior Administrator", ROLE_SENIOR_ADMIN),
-    ("Administrator",        ROLE_ADMIN),
-    ("Junior Administrator", ROLE_JUNIOR_ADMIN),
-    ("Trial Administrator",  ROLE_TRIAL_ADMIN),
-    ("Lead Moderator",       ROLE_LEAD_MOD),
-    ("Senior Moderator",     ROLE_SENIOR_MOD),
-    ("Moderator",            ROLE_MOD),
-    ("Junior Moderator",     ROLE_JUNIOR_MOD),
-    ("Trial Moderator",      ROLE_TRIAL_MOD),
-]
-
-ADMIN_ROLES = {ROLE_LEAD_ADMIN, ROLE_SENIOR_ADMIN, ROLE_ADMIN, ROLE_JUNIOR_ADMIN, ROLE_TRIAL_ADMIN}
-MOD_ROLES   = {ROLE_LEAD_MOD, ROLE_SENIOR_MOD, ROLE_MOD, ROLE_JUNIOR_MOD, ROLE_TRIAL_MOD}
-
 @bot.command(name="fastpass")
-async def fastpass_command(ctx: commands.Context, *, username: str = None):
-    if not is_foundership(ctx):
-        await ctx.send("❌ This command is restricted to **Foundership Team** only.")
-        return
+async def fastpass_command(ctx: commands.Context):
+    applicant = ctx.author
+    channel = ctx.channel
 
-    if not username:
-        await ctx.send("❌ Usage: `s!fastpass <username>`\nExample: `s!fastpass JohnDoe`")
-        return
+    def check_author(m):
+        return m.author.id == applicant.id and m.channel.id == channel.id
 
-    # Kullanıcıyı bul
-    target = discord.utils.find(
-        lambda m: m.name.lower() == username.lower() or m.display_name.lower() == username.lower(),
-        ctx.guild.members
-    )
-    if not target:
-        await ctx.send(f"❌ Could not find a member with the name `{username}`.")
-        return
-
-    # Rol seçim dropdown
-    class RoleSelect(discord.ui.Select):
-        def __init__(self):
-            options = [
-                discord.SelectOption(label=name, value=str(role_id))
-                for name, role_id in FASTPASS_ROLES
-            ]
-            super().__init__(placeholder="Select a role to assign...", options=options)
-
-        async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("❌ Only the command user can select.", ephemeral=True)
-                return
-            self.view.selected_role_id = int(self.values[0])
-            self.view.selected_role_name = next(name for name, rid in FASTPASS_ROLES if rid == self.view.selected_role_id)
-            self.view.stop()
-            await interaction.response.defer()
-
-    class RoleSelectView(discord.ui.View):
+    # Adım 1: Transfer mi?
+    class TransferView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=60)
-            self.selected_role_id = None
-            self.selected_role_name = None
-            self.add_item(RoleSelect())
+            self.is_transfer = None
 
-    select_view = RoleSelectView()
-    await ctx.send(
-        f"👤 Assigning a Fast Pass role to **{target.display_name}**.\nPlease select the role:",
-        view=select_view
-    )
-    await select_view.wait()
-
-    if not select_view.selected_role_id:
-        await ctx.send("⏰ Timed out. No role was assigned.")
-        return
-
-    role_id = select_view.selected_role_id
-    role_name = select_view.selected_role_name
-
-    # Onay aşaması
-    class ConfirmView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=60)
-            self.confirmed = None
-
-        @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success)
-        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("❌ Only the command user can confirm.", ephemeral=True)
+        @discord.ui.button(label="✅ Yes — Transfer", style=discord.ButtonStyle.primary)
+        async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
                 return
-            self.confirmed = True
+            self.is_transfer = True
             self.stop()
             await interaction.response.defer()
 
-        @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
-        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("❌ Only the command user can cancel.", ephemeral=True)
+        @discord.ui.button(label="❌ No — Standard", style=discord.ButtonStyle.secondary)
+        async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
                 return
-            self.confirmed = False
+            self.is_transfer = False
             self.stop()
             await interaction.response.defer()
 
-    confirm_view = ConfirmView()
+    transfer_view = TransferView()
     await ctx.send(
-        f"⚠️ You are about to assign **{role_name}** to {target.mention}.\n"
-        f"Do you confirm?",
-        view=confirm_view
+        "📋 **Fast Pass Application**\n\nIs this a **transfer** from another server?",
+        view=transfer_view
     )
-    await confirm_view.wait()
+    await transfer_view.wait()
 
-    if not confirm_view.confirmed:
-        await ctx.send("❌ Role assignment cancelled.")
+    if transfer_view.is_transfer is None:
+        await ctx.send("⏰ Application timed out.")
         return
 
-    # Rolleri ver
-    roles_to_add = [role_id]
+    is_transfer = transfer_view.is_transfer
 
-    if role_id in ADMIN_ROLES:
-        roles_to_add.append(ROLE_ADMINISTRATION_TEAM)
-        roles_to_add.append(ROLE_STAFF_TEAM)
-    elif role_id in MOD_ROLES:
-        roles_to_add.append(ROLE_MODERATION_TEAM)
-        roles_to_add.append(ROLE_STAFF_TEAM)
+    # Adım 2: Formu gönder
+    if is_transfer:
+        form_text = (
+            "📋 **Fast Pass Application — Transfer**\n\n"
+            "Fill in **all fields** and send in **one message**:\n\n"
+            "```\n"
+            "1. Discord Username:\n"
+            "2. Roblox Username:\n"
+            "3. What will you bring:\n"
+            "4. Strengths:\n"
+            "5. Weaknesses:\n"
+            "6. Proof of roles (screenshot/link):\n"
+            "7. Proof of Retirement (screenshot/link):\n"
+            "```"
+        )
+        app_type = "🔄 Transfer"
+    else:
+        form_text = (
+            "📋 **Fast Pass Application — Standard**\n\n"
+            "Fill in **all fields** and send in **one message**:\n\n"
+            "```\n"
+            "1. Discord Username:\n"
+            "2. Roblox Username:\n"
+            "3. What will you bring:\n"
+            "4. Strengths:\n"
+            "5. Weaknesses:\n"
+            "6. Proof of roles (screenshot/link):\n"
+            "```"
+        )
+        app_type = "📝 Standard"
 
-    added_roles = []
-    for rid in roles_to_add:
-        role_obj = ctx.guild.get_role(rid)
-        if role_obj and role_obj not in target.roles:
-            await target.add_roles(role_obj, reason=f"Fast Pass by {ctx.author.display_name}")
-            added_roles.append(role_obj.name)
+    await ctx.send(form_text)
 
-    added_str = ", ".join(f"**{r}**" for r in added_roles) if added_roles else "None (already had roles)"
-    await ctx.send(
-        f"✅ Successfully assigned roles to {target.mention}:\n{added_str}"
-    )
-
-# ───────────────────────────────────────────
-# s!partnership
-# ───────────────────────────────────────────
-
-@bot.command(name="partnership")
-async def partnership_command(ctx: commands.Context):
-    if not is_foundership(ctx):
-        await ctx.send("❌ This command is restricted to **Foundership Team** only.")
-        return
-
-    await ctx.send(
-        "📝 **Partnership Application**\n"
-        "Please provide the partnership server's details.\n\n"
-        "Reply with the following information (all in one message):\n"
-        "```\n"
-        "Server Name:\n"
-        "Server Invite Link:\n"
-        "Member Count:\n"
-        "What they offer:\n"
-        "Additional Notes (optional):\n"
-        "```"
-    )
-
-    def check(m):
-        return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
-
+    # Adım 3: Cevabı bekle
     try:
-        response = await bot.wait_for("message", check=check, timeout=300)
+        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
     except asyncio.TimeoutError:
-        await ctx.send("⏰ Partnership application timed out. Please try again.")
+        await ctx.send("⏰ Application timed out. Please try again with `s!fastpass`.")
         return
 
-    details = response.content
+    form_content = response_msg.content
 
-    # Preview embed
+    # Adım 4: Preview + confirm
     preview_embed = discord.Embed(
-        title="🤝 Partnership Application Preview",
-        description=details,
+        title="📋 Fast Pass Application — Preview",
+        description=form_content,
         color=discord.Color.gold()
     )
-    preview_embed.set_footer(text="Does this look correct? Confirm to post it to #partnerships.")
+    preview_embed.add_field(name="Type", value=app_type, inline=True)
+    preview_embed.add_field(name="Applicant", value=applicant.mention, inline=True)
+    preview_embed.set_footer(text="Does everything look correct? Confirm to submit.")
 
     class PreviewView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=60)
             self.confirmed = None
 
-        @discord.ui.button(label="✅ Confirm & Post", style=discord.ButtonStyle.success)
+        @discord.ui.button(label="✅ Submit", style=discord.ButtonStyle.success)
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("❌ Only the command user can confirm.", ephemeral=True)
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
                 return
             self.confirmed = True
             self.stop()
@@ -494,8 +602,8 @@ async def partnership_command(ctx: commands.Context):
 
         @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
         async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("❌ Only the command user can cancel.", ephemeral=True)
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
                 return
             self.confirmed = False
             self.stop()
@@ -506,25 +614,303 @@ async def partnership_command(ctx: commands.Context):
     await preview_view.wait()
 
     if not preview_view.confirmed:
-        await ctx.send("❌ Partnership application cancelled.")
+        await ctx.send("❌ Application cancelled.")
         return
 
-    # Partnerships kanalına gönder
+    # Adım 5: Foundership'e gönder
+    foundership_role = ctx.guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
+    foundership_ping = foundership_role.mention if foundership_role else "@Foundership Team"
+
+    submission_embed = discord.Embed(
+        title="⚡ New Fast Pass Application",
+        description=form_content,
+        color=discord.Color.blurple()
+    )
+    submission_embed.add_field(name="Type", value=app_type, inline=True)
+    submission_embed.add_field(name="Applicant", value=f"{applicant.mention} (`{applicant.name}`)", inline=True)
+    submission_embed.add_field(name="Channel", value=channel.mention, inline=True)
+    submission_embed.set_footer(text=f"Submitted • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    promote_view = make_promote_view(applicant, channel, FOUNDERSHIP_TEAM_ROLE_ID)
+    await ctx.send(
+        f"{foundership_ping} — New Fast Pass application!",
+        embed=submission_embed,
+        view=promote_view
+    )
+
+    await ctx.send(
+        f"✅ {applicant.mention} Your application has been submitted! "
+        f"**Foundership Team** has been notified and will review it shortly."
+    )
+
+# ───────────────────────────────────────────
+# s!transfer
+# ───────────────────────────────────────────
+
+@bot.command(name="transfer")
+async def transfer_command(ctx: commands.Context):
+    applicant = ctx.author
+    channel = ctx.channel
+
+    def check_author(m):
+        return m.author.id == applicant.id and m.channel.id == channel.id
+
+    await ctx.send(
+        "📋 **Transfer / Retirement Application**\n\n"
+        "Fill in **all fields** and send in **one message**:\n\n"
+        "```\n"
+        "1. Discord Username:\n"
+        "2. Roblox Username:\n"
+        "3. What will you bring:\n"
+        "4. Strengths:\n"
+        "5. Weaknesses:\n"
+        "6. Proof of roles (screenshot/link):\n"
+        "7. Proof of Retirement (screenshot/link):\n"
+        "```"
+    )
+
+    try:
+        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Application timed out. Please try again with `s!transfer`.")
+        return
+
+    form_content = response_msg.content
+
+    # Preview + confirm
+    preview_embed = discord.Embed(
+        title="🔄 Transfer Application — Preview",
+        description=form_content,
+        color=discord.Color.gold()
+    )
+    preview_embed.add_field(name="Type", value="🔄 Transfer / Retirement", inline=True)
+    preview_embed.add_field(name="Applicant", value=applicant.mention, inline=True)
+    preview_embed.set_footer(text="Does everything look correct? Confirm to submit.")
+
+    class PreviewView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.confirmed = None
+
+        @discord.ui.button(label="✅ Submit", style=discord.ButtonStyle.success)
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
+                return
+            self.confirmed = True
+            self.stop()
+            await interaction.response.defer()
+
+        @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
+                return
+            self.confirmed = False
+            self.stop()
+            await interaction.response.defer()
+
+    preview_view = PreviewView()
+    await ctx.send(embed=preview_embed, view=preview_view)
+    await preview_view.wait()
+
+    if not preview_view.confirmed:
+        await ctx.send("❌ Application cancelled.")
+        return
+
+    # Foundership'e gönder
+    foundership_role = ctx.guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
+    foundership_ping = foundership_role.mention if foundership_role else "@Foundership Team"
+
+    submission_embed = discord.Embed(
+        title="🔄 New Transfer / Retirement Application",
+        description=form_content,
+        color=discord.Color.orange()
+    )
+    submission_embed.add_field(name="Type", value="🔄 Transfer / Retirement", inline=True)
+    submission_embed.add_field(name="Applicant", value=f"{applicant.mention} (`{applicant.name}`)", inline=True)
+    submission_embed.add_field(name="Channel", value=channel.mention, inline=True)
+    submission_embed.set_footer(text=f"Submitted • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    promote_view = make_promote_view(applicant, channel, FOUNDERSHIP_TEAM_ROLE_ID)
+    await ctx.send(
+        f"{foundership_ping} — New Transfer/Retirement application!",
+        embed=submission_embed,
+        view=promote_view
+    )
+
+    await ctx.send(
+        f"✅ {applicant.mention} Your transfer application has been submitted! "
+        f"**Foundership Team** has been notified and will review it shortly."
+    )
+
+# ───────────────────────────────────────────
+# s!partnership
+# ───────────────────────────────────────────
+
+@bot.command(name="partnership")
+async def partnership_command(ctx: commands.Context):
+    applicant = ctx.author
+    channel = ctx.channel
+
+    def check_author(m):
+        return m.author.id == applicant.id and m.channel.id == channel.id
+
+    await ctx.send(
+        "🤝 **Partnership Application**\n\n"
+        "Fill in **all fields** and send in **one message**:\n\n"
+        "```\n"
+        "Server Name:\n"
+        "Server Invite Link:\n"
+        "Membercount:\n"
+        "Rank in server:\n"
+        "Reason:\n"
+        "Staff Partnership? (Yes/No):\n"
+        "Paying? (Yes/No):\n"
+        "```\n"
+        "ℹ️ **Staff Partnership** = Cross-server staff fast pass (join their staff team)\n"
+        "ℹ️ **Paying** = Paid/sponsored partnership"
+    )
+
+    try:
+        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Application timed out. Please try again with `s!partnership`.")
+        return
+
+    form_content = response_msg.content
+
+    # Preview + confirm
+    preview_embed = discord.Embed(
+        title="🤝 Partnership Application — Preview",
+        description=form_content,
+        color=discord.Color.gold()
+    )
+    preview_embed.add_field(name="Applicant", value=applicant.mention, inline=True)
+    preview_embed.set_footer(text="Does everything look correct? Confirm to submit.")
+
+    class PreviewView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.confirmed = None
+
+        @discord.ui.button(label="✅ Submit", style=discord.ButtonStyle.success)
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
+                return
+            self.confirmed = True
+            self.stop()
+            await interaction.response.defer()
+
+        @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != applicant.id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
+                return
+            self.confirmed = False
+            self.stop()
+            await interaction.response.defer()
+
+    preview_view = PreviewView()
+    await ctx.send(embed=preview_embed, view=preview_view)
+    await preview_view.wait()
+
+    if not preview_view.confirmed:
+        await ctx.send("❌ Application cancelled.")
+        return
+
+    # #partnerships kanalına + Foundership ping
     partner_channel = ctx.guild.get_channel(PARTNERSHIP_CHANNEL_ID)
-    if not partner_channel:
-        await ctx.send("❌ Could not find the partnerships channel.")
-        return
+    foundership_role = ctx.guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
+    foundership_ping = foundership_role.mention if foundership_role else "@Foundership Team"
 
-    post_embed = discord.Embed(
-        title="🤝 New Partnership",
-        description=details,
+    submission_embed = discord.Embed(
+        title="🤝 New Partnership Application",
+        description=form_content,
         color=discord.Color.green()
     )
-    post_embed.set_footer(text=f"Submitted by {ctx.author.display_name}")
+    submission_embed.add_field(
+        name="Applicant",
+        value=f"{applicant.mention} (`{applicant.name}`)",
+        inline=True
+    )
+    submission_embed.add_field(name="Submitted in", value=channel.mention, inline=True)
+    submission_embed.set_footer(text=f"Submitted • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
-    await partner_channel.send("@everyone", embed=post_embed)
-    await ctx.send(f"✅ Partnership posted to {partner_channel.mention}!")
+    # Approve / Deny butonları (Foundership only)
+    class PartnershipReviewView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
 
+        @discord.ui.button(label="✅ Approve & Post", style=discord.ButtonStyle.success, emoji="🤝")
+        async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+            fp_role = interaction.guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
+            if fp_role not in interaction.user.roles:
+                await interaction.response.send_message(
+                    "❌ Only **Foundership Team** can approve partnerships.", ephemeral=True
+                )
+                return
+
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+
+            if partner_channel:
+                post_embed = discord.Embed(
+                    title="🤝 New Partnership",
+                    description=form_content,
+                    color=discord.Color.green()
+                )
+                post_embed.set_footer(text=f"Approved by {interaction.user.display_name}")
+                await partner_channel.send("@everyone", embed=post_embed)
+
+            await interaction.response.send_message(
+                f"✅ Partnership from **{applicant.display_name}** approved and posted to {partner_channel.mention if partner_channel else '#partnerships'}!",
+                ephemeral=False
+            )
+            try:
+                await channel.send(
+                    f"🎉 {applicant.mention} Your partnership application has been **approved** and posted!"
+                )
+            except Exception:
+                pass
+
+        @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, emoji="✖️")
+        async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+            fp_role = interaction.guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
+            if fp_role not in interaction.user.roles:
+                await interaction.response.send_message(
+                    "❌ Only **Foundership Team** can deny partnerships.", ephemeral=True
+                )
+                return
+
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+
+            await interaction.response.send_message(
+                f"❌ Partnership from **{applicant.display_name}** has been **denied**.",
+                ephemeral=False
+            )
+            try:
+                await channel.send(
+                    f"❌ {applicant.mention} Unfortunately, your partnership application has been **denied**."
+                )
+            except Exception:
+                pass
+
+    review_view = PartnershipReviewView()
+    await ctx.send(
+        f"{foundership_ping} — New Partnership application!",
+        embed=submission_embed,
+        view=review_view
+    )
+
+    await ctx.send(
+        f"✅ {applicant.mention} Your partnership application has been submitted! "
+        f"**Foundership Team** will review it shortly."
+    )
 
 # ───────────────────────────────────────────
 # MAIN
