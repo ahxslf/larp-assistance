@@ -7,6 +7,7 @@ from discord.ext import commands
 from config import (
     DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID,
     TRANSCRIPT_CHANNEL_ID, FOUNDERSHIP_TEAM_ROLE_ID, FASTPASS_TEAM_ROLE_ID,
+    MANAGEMENT_TEAM_ROLE_ID, DIRECTIVE_TEAM_ROLE_ID,
     PARTNERSHIP_CHANNEL_ID,
     ROLE_LEAD_ADMIN, ROLE_SENIOR_ADMIN, ROLE_ADMIN, ROLE_JUNIOR_ADMIN, ROLE_TRIAL_ADMIN,
     ROLE_ADMINISTRATION_TEAM,
@@ -77,13 +78,15 @@ def is_staff(ctx: commands.Context) -> bool:
     staff_role = ctx.guild.get_role(STAFF_ROLE_ID)
     return staff_role in ctx.author.roles
 
-def is_fastpass_team(interaction: discord.Interaction) -> bool:
-    """Fastpass Team veya Foundership Team kontrolü."""
-    guild = interaction.guild
-    fp_role = guild.get_role(FASTPASS_TEAM_ROLE_ID)
-    founder_role = guild.get_role(FOUNDERSHIP_TEAM_ROLE_ID)
-    user_roles = interaction.user.roles
-    return (fp_role in user_roles) or (founder_role in user_roles)
+def can_review_application(interaction: discord.Interaction) -> bool:
+    """Management Team, Directive Team veya Foundership Team kontrolü."""
+    user_role_ids = {r.id for r in interaction.user.roles}
+    return bool(user_role_ids & {
+        MANAGEMENT_TEAM_ROLE_ID,
+        DIRECTIVE_TEAM_ROLE_ID,
+        FOUNDERSHIP_TEAM_ROLE_ID,
+        FASTPASS_TEAM_ROLE_ID,
+    })
 
 def is_ticket_channel(ctx: commands.Context) -> bool:
     return (
@@ -91,6 +94,17 @@ def is_ticket_channel(ctx: commands.Context) -> bool:
         and ctx.channel.category.id == TICKET_CATEGORY_ID
         and ctx.channel.name.startswith("support-")
     )
+
+def get_ping_text(guild: discord.Guild) -> str:
+    """Management Team + Directive Team mention."""
+    mgmt = guild.get_role(MANAGEMENT_TEAM_ROLE_ID)
+    dire = guild.get_role(DIRECTIVE_TEAM_ROLE_ID)
+    parts = []
+    if mgmt:
+        parts.append(mgmt.mention)
+    if dire:
+        parts.append(dire.mention)
+    return " ".join(parts) if parts else "@Management Team @Directive Team"
 
 async def send_transcript(channel: discord.TextChannel, guild: discord.Guild, closed_by: discord.Member):
     transcript_channel = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
@@ -116,42 +130,95 @@ async def send_transcript(channel: discord.TextChannel, guild: discord.Guild, cl
     await transcript_channel.send(embed=embed, file=file)
     print(f"[Transcript] Sent for #{channel.name}")
 
-async def do_promote(interaction: discord.Interaction, applicant: discord.Member, notify_channel: discord.TextChannel):
-    """Rol seçim menüsünü ephemeral olarak gönder."""
+async def give_roles(guild: discord.Guild, applicant: discord.Member, role_id: int, promoted_by: str):
+    """Rol ver + otomatik ekstra roller."""
+    roles_to_add = [role_id]
+    if role_id in ADMIN_ROLE_IDS:
+        roles_to_add.append(ROLE_ADMINISTRATION_TEAM)
+        roles_to_add.append(ROLE_STAFF_TEAM)
+    elif role_id in MOD_ROLE_IDS:
+        roles_to_add.append(ROLE_MODERATION_TEAM)
+        roles_to_add.append(ROLE_STAFF_TEAM)
 
-    class RoleSelect(discord.ui.Select):
-        def __init__(self):
+    added = []
+    failed = []
+    for rid in roles_to_add:
+        role_obj = guild.get_role(rid)
+        if role_obj is None:
+            failed.append(str(rid))
+            continue
+        if role_obj in applicant.roles:
+            continue
+        try:
+            await applicant.add_roles(role_obj, reason=f"Fast Pass by {promoted_by}")
+            added.append(role_obj.name)
+        except discord.Forbidden:
+            failed.append(role_obj.name)
+        except Exception as e:
+            failed.append(f"{role_obj.name} ({e})")
+
+    return added, failed
+
+# ───────────────────────────────────────────
+# ROLE SELECT VIEW (reusable)
+# ───────────────────────────────────────────
+
+class RoleSelectView(discord.ui.View):
+    """Rol seçim view'ı — ephemeral olarak gönderilir."""
+
+    def __init__(self, applicant: discord.Member, notify_channel: discord.TextChannel, parent_message: discord.Message):
+        super().__init__(timeout=120)
+        self.applicant = applicant
+        self.notify_channel = notify_channel
+        self.parent_message = parent_message
+        self.add_item(self.RoleDropdown(self))
+
+    class RoleDropdown(discord.ui.Select):
+        def __init__(self, parent_view):
+            self.parent_view = parent_view
             options = [
                 discord.SelectOption(label=name, value=str(role_id))
                 for name, role_id in FASTPASS_ROLES
             ]
-            super().__init__(placeholder="Select a role to assign...", options=options, min_values=1, max_values=1)
+            super().__init__(
+                placeholder="Select a role to assign...",
+                options=options,
+                min_values=1,
+                max_values=1
+            )
 
-        async def callback(self, select_interaction: discord.Interaction):
-            await select_interaction.response.defer(ephemeral=True)
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
 
             selected_id = int(self.values[0])
             selected_name = next(n for n, rid in FASTPASS_ROLES if rid == selected_id)
+            applicant = self.parent_view.applicant
+            notify_channel = self.parent_view.notify_channel
 
-            roles_to_add = [selected_id]
-            if selected_id in ADMIN_ROLE_IDS:
-                roles_to_add.append(ROLE_ADMINISTRATION_TEAM)
-                roles_to_add.append(ROLE_STAFF_TEAM)
-            elif selected_id in MOD_ROLE_IDS:
-                roles_to_add.append(ROLE_MODERATION_TEAM)
-                roles_to_add.append(ROLE_STAFF_TEAM)
-
-            added = []
-            for rid in roles_to_add:
-                role_obj = select_interaction.guild.get_role(rid)
-                if role_obj and role_obj not in applicant.roles:
-                    await applicant.add_roles(role_obj, reason=f"Fast Pass by {select_interaction.user.display_name}")
-                    added.append(role_obj.name)
+            added, failed = await give_roles(
+                interaction.guild, applicant, selected_id,
+                interaction.user.display_name
+            )
 
             added_str = ", ".join(f"**{r}**" for r in added) if added else "*(already had all roles)*"
+            fail_str = f"\n⚠️ Failed to assign: {', '.join(failed)}" if failed else ""
 
-            await select_interaction.followup.send(
-                f"✅ **{applicant.display_name}** promoted to **{selected_name}**!\nRoles assigned: {added_str}",
+            # Üst mesajdaki butonları devre dışı bırak
+            try:
+                for item in self.parent_view.parent_message.components:
+                    pass  # discord.py v2 edit ile yapılır
+                # Parent view'ı disable et
+                disabled_view = discord.ui.View()
+                disabled_view.add_item(
+                    discord.ui.Button(label="✅ Promoted", style=discord.ButtonStyle.success, disabled=True)
+                )
+                await self.parent_view.parent_message.edit(view=disabled_view)
+            except Exception:
+                pass
+
+            await interaction.followup.send(
+                f"✅ **{applicant.display_name}** promoted to **{selected_name}**!\n"
+                f"Roles assigned: {added_str}{fail_str}",
                 ephemeral=True
             )
 
@@ -163,64 +230,62 @@ async def do_promote(interaction: discord.Interaction, applicant: discord.Member
             except Exception:
                 pass
 
-    class RoleSelectView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=120)
-            self.add_item(RoleSelect())
-
-    await interaction.followup.send(
-        f"Select the role to assign to **{applicant.display_name}**:",
-        view=RoleSelectView(),
-        ephemeral=True
-    )
+            self.parent_view.stop()
 
 # ───────────────────────────────────────────
-# PERSISTENT VIEWS (survive bot restart için custom_id kullanılır)
+# APPLICATION REVIEW VIEW
 # ───────────────────────────────────────────
 
 class ApplicationReviewView(discord.ui.View):
-    """Fast pass / Transfer review view — Fastpass Team only."""
+    """Fast pass / Transfer review — Management + Directive Team."""
 
     def __init__(self, applicant_id: int, notify_channel_id: int):
-        super().__init__(timeout=None)  # persistent
+        super().__init__(timeout=None)
         self.applicant_id = applicant_id
         self.notify_channel_id = notify_channel_id
 
     @discord.ui.button(label="✅ Promote", style=discord.ButtonStyle.success, emoji="⬆️",
                        custom_id="app_promote")
     async def promote(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_fastpass_team(interaction):
+        if not can_review_application(interaction):
             await interaction.response.send_message(
-                "❌ Only **Fastpass Team** or **Foundership Team** can promote applicants.",
+                "❌ Only **Management Team** or **Directive Team** can promote applicants.",
                 ephemeral=True
             )
             return
-
-        await interaction.response.defer(ephemeral=True)
 
         applicant = interaction.guild.get_member(self.applicant_id)
         notify_channel = interaction.guild.get_channel(self.notify_channel_id)
 
         if not applicant:
-            await interaction.followup.send("❌ Could not find the applicant in this server.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Could not find the applicant — they may have left the server.",
+                ephemeral=True
+            )
             return
 
-        await do_promote(interaction, applicant, notify_channel)
+        # Rol seçim view'ını ephemeral olarak gönder
+        # Önce interaction'ı defer et
+        await interaction.response.defer(ephemeral=True)
 
-        # Butonları devre dışı bırak
-        for item in self.children:
-            item.disabled = True
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
+        role_select_view = RoleSelectView(
+            applicant=applicant,
+            notify_channel=notify_channel,
+            parent_message=interaction.message
+        )
+
+        await interaction.followup.send(
+            f"Select the role to assign to **{applicant.display_name}**:",
+            view=role_select_view,
+            ephemeral=True
+        )
 
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, emoji="✖️",
                        custom_id="app_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_fastpass_team(interaction):
+        if not can_review_application(interaction):
             await interaction.response.send_message(
-                "❌ Only **Fastpass Team** or **Foundership Team** can deny applications.",
+                "❌ Only **Management Team** or **Directive Team** can deny applications.",
                 ephemeral=True
             )
             return
@@ -230,15 +295,19 @@ class ApplicationReviewView(discord.ui.View):
         applicant = interaction.guild.get_member(self.applicant_id)
         notify_channel = interaction.guild.get_channel(self.notify_channel_id)
 
-        for item in self.children:
-            item.disabled = True
+        # Butonları devre dışı bırak
+        disabled_view = discord.ui.View()
+        disabled_view.add_item(
+            discord.ui.Button(label="❌ Denied", style=discord.ButtonStyle.danger, disabled=True)
+        )
         try:
-            await interaction.message.edit(view=self)
+            await interaction.message.edit(view=disabled_view)
         except Exception:
             pass
 
+        name = applicant.display_name if applicant else "Unknown"
         await interaction.followup.send(
-            f"❌ Application from **{applicant.display_name if applicant else 'Unknown'}** has been **denied**."
+            f"❌ Application from **{name}** has been **denied**."
         )
 
         if notify_channel and applicant:
@@ -249,9 +318,12 @@ class ApplicationReviewView(discord.ui.View):
             except Exception:
                 pass
 
+# ───────────────────────────────────────────
+# PARTNERSHIP REVIEW VIEW
+# ───────────────────────────────────────────
 
 class PartnershipReviewView(discord.ui.View):
-    """Partnership review view — Fastpass Team only."""
+    """Partnership review — Management + Directive Team."""
 
     def __init__(self, applicant_id: int, notify_channel_id: int, form_content: str):
         super().__init__(timeout=None)
@@ -262,9 +334,9 @@ class PartnershipReviewView(discord.ui.View):
     @discord.ui.button(label="✅ Approve & Post", style=discord.ButtonStyle.success, emoji="🤝",
                        custom_id="partner_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_fastpass_team(interaction):
+        if not can_review_application(interaction):
             await interaction.response.send_message(
-                "❌ Only **Fastpass Team** or **Foundership Team** can approve partnerships.",
+                "❌ Only **Management Team** or **Directive Team** can approve partnerships.",
                 ephemeral=True
             )
             return
@@ -275,10 +347,12 @@ class PartnershipReviewView(discord.ui.View):
         notify_channel = interaction.guild.get_channel(self.notify_channel_id)
         partner_channel = interaction.guild.get_channel(PARTNERSHIP_CHANNEL_ID)
 
-        for item in self.children:
-            item.disabled = True
+        disabled_view = discord.ui.View()
+        disabled_view.add_item(
+            discord.ui.Button(label="✅ Approved", style=discord.ButtonStyle.success, disabled=True)
+        )
         try:
-            await interaction.message.edit(view=self)
+            await interaction.message.edit(view=disabled_view)
         except Exception:
             pass
 
@@ -291,9 +365,8 @@ class PartnershipReviewView(discord.ui.View):
             post_embed.set_footer(text=f"Approved by {interaction.user.display_name}")
             await partner_channel.send("@everyone", embed=post_embed)
 
-        await interaction.followup.send(
-            f"✅ Partnership approved and posted to {partner_channel.mention if partner_channel else '#partnerships'}!"
-        )
+        ch_mention = partner_channel.mention if partner_channel else "#partnerships"
+        await interaction.followup.send(f"✅ Partnership approved and posted to {ch_mention}!")
 
         if notify_channel and applicant:
             try:
@@ -306,9 +379,9 @@ class PartnershipReviewView(discord.ui.View):
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, emoji="✖️",
                        custom_id="partner_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_fastpass_team(interaction):
+        if not can_review_application(interaction):
             await interaction.response.send_message(
-                "❌ Only **Fastpass Team** or **Foundership Team** can deny partnerships.",
+                "❌ Only **Management Team** or **Directive Team** can deny partnerships.",
                 ephemeral=True
             )
             return
@@ -318,16 +391,17 @@ class PartnershipReviewView(discord.ui.View):
         applicant = interaction.guild.get_member(self.applicant_id)
         notify_channel = interaction.guild.get_channel(self.notify_channel_id)
 
-        for item in self.children:
-            item.disabled = True
+        disabled_view = discord.ui.View()
+        disabled_view.add_item(
+            discord.ui.Button(label="❌ Denied", style=discord.ButtonStyle.danger, disabled=True)
+        )
         try:
-            await interaction.message.edit(view=self)
+            await interaction.message.edit(view=disabled_view)
         except Exception:
             pass
 
-        await interaction.followup.send(
-            f"❌ Partnership from **{applicant.display_name if applicant else 'Unknown'}** denied."
-        )
+        name = applicant.display_name if applicant else "Unknown"
+        await interaction.followup.send(f"❌ Partnership from **{name}** denied.")
 
         if notify_channel and applicant:
             try:
@@ -584,12 +658,18 @@ async def cmds_command(ctx: commands.Context):
         inline=False
     )
     embed.add_field(
-        name="🔒 Fastpass Team / Foundership Only",
+        name="🔒 Management Team / Directive Team Only",
         value="Promote/Deny/Approve buttons on submitted applications.",
         inline=False
     )
     embed.set_footer(text="LARP | Assistance • Los Angeles Roleplay")
     await ctx.send(embed=embed)
+
+# ───────────────────────────────────────────
+# SHARED: rate limit helper
+# ───────────────────────────────────────────
+
+RATE_LIMIT_SECONDS = 40
 
 # ───────────────────────────────────────────
 # s!fastpass
@@ -601,8 +681,12 @@ async def fastpass_command(ctx: commands.Context):
     channel = ctx.channel
 
     def check_author(m):
-        return m.author.id == applicant.id and m.channel.id == channel.id and \
-               not m.content.startswith("!") and not m.content.startswith("s!")
+        return (
+            m.author.id == applicant.id
+            and m.channel.id == channel.id
+            and not m.content.startswith("!")
+            and not m.content.startswith("s!")
+        )
 
     # Transfer mi?
     class TransferView(discord.ui.View):
@@ -637,7 +721,6 @@ async def fastpass_command(ctx: commands.Context):
         return
 
     is_transfer = transfer_view.is_transfer
-
     if is_transfer:
         form_text = (
             "📋 **Fast Pass Application — Transfer**\n\n"
@@ -671,7 +754,7 @@ async def fastpass_command(ctx: commands.Context):
     await ctx.send(form_text)
 
     try:
-        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
+        response_msg = await bot.wait_for("message", check=check_author, timeout=RATE_LIMIT_SECONDS * 15)
     except asyncio.TimeoutError:
         await ctx.send("⏰ Application timed out. Please try again with `s!fastpass`.")
         return
@@ -719,9 +802,7 @@ async def fastpass_command(ctx: commands.Context):
         await ctx.send("❌ Application cancelled.")
         return
 
-    # Fastpass Team'e gönder
-    fastpass_role = ctx.guild.get_role(FASTPASS_TEAM_ROLE_ID)
-    fastpass_ping = fastpass_role.mention if fastpass_role else "@Fastpass Team"
+    ping_text = get_ping_text(ctx.guild)
 
     submission_embed = discord.Embed(
         title="⚡ New Fast Pass Application",
@@ -734,10 +815,10 @@ async def fastpass_command(ctx: commands.Context):
     submission_embed.set_footer(text=f"Submitted • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     review_view = ApplicationReviewView(applicant_id=applicant.id, notify_channel_id=channel.id)
-    await ctx.send(f"{fastpass_ping} — New Fast Pass application!", embed=submission_embed, view=review_view)
+    await ctx.send(f"{ping_text} — New Fast Pass application!", embed=submission_embed, view=review_view)
     await ctx.send(
         f"✅ {applicant.mention} Your application has been submitted! "
-        f"**Fastpass Team** has been notified and will review it shortly."
+        f"**Management Team** and **Directive Team** have been notified."
     )
 
 # ───────────────────────────────────────────
@@ -750,8 +831,12 @@ async def transfer_command(ctx: commands.Context):
     channel = ctx.channel
 
     def check_author(m):
-        return m.author.id == applicant.id and m.channel.id == channel.id and \
-               not m.content.startswith("!") and not m.content.startswith("s!")
+        return (
+            m.author.id == applicant.id
+            and m.channel.id == channel.id
+            and not m.content.startswith("!")
+            and not m.content.startswith("s!")
+        )
 
     await ctx.send(
         "📋 **Transfer / Retirement Application**\n\n"
@@ -768,7 +853,7 @@ async def transfer_command(ctx: commands.Context):
     )
 
     try:
-        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
+        response_msg = await bot.wait_for("message", check=check_author, timeout=RATE_LIMIT_SECONDS * 15)
     except asyncio.TimeoutError:
         await ctx.send("⏰ Application timed out. Please try again with `s!transfer`.")
         return
@@ -815,8 +900,7 @@ async def transfer_command(ctx: commands.Context):
         await ctx.send("❌ Application cancelled.")
         return
 
-    fastpass_role = ctx.guild.get_role(FASTPASS_TEAM_ROLE_ID)
-    fastpass_ping = fastpass_role.mention if fastpass_role else "@Fastpass Team"
+    ping_text = get_ping_text(ctx.guild)
 
     submission_embed = discord.Embed(
         title="🔄 New Transfer / Retirement Application",
@@ -829,10 +913,10 @@ async def transfer_command(ctx: commands.Context):
     submission_embed.set_footer(text=f"Submitted • {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     review_view = ApplicationReviewView(applicant_id=applicant.id, notify_channel_id=channel.id)
-    await ctx.send(f"{fastpass_ping} — New Transfer/Retirement application!", embed=submission_embed, view=review_view)
+    await ctx.send(f"{ping_text} — New Transfer/Retirement application!", embed=submission_embed, view=review_view)
     await ctx.send(
         f"✅ {applicant.mention} Your transfer application has been submitted! "
-        f"**Fastpass Team** has been notified and will review it shortly."
+        f"**Management Team** and **Directive Team** have been notified."
     )
 
 # ───────────────────────────────────────────
@@ -845,8 +929,12 @@ async def partnership_command(ctx: commands.Context):
     channel = ctx.channel
 
     def check_author(m):
-        return m.author.id == applicant.id and m.channel.id == channel.id and \
-               not m.content.startswith("!") and not m.content.startswith("s!")
+        return (
+            m.author.id == applicant.id
+            and m.channel.id == channel.id
+            and not m.content.startswith("!")
+            and not m.content.startswith("s!")
+        )
 
     await ctx.send(
         "🤝 **Partnership Application**\n\n"
@@ -860,12 +948,12 @@ async def partnership_command(ctx: commands.Context):
         "Staff Partnership? (Yes/No):\n"
         "Paying? (Yes/No):\n"
         "```\n"
-        "ℹ️ **Staff Partnership** = Cross-server staff fast pass (join their staff team)\n"
+        "ℹ️ **Staff Partnership** = Cross-server staff fast pass\n"
         "ℹ️ **Paying** = Paid/sponsored partnership"
     )
 
     try:
-        response_msg = await bot.wait_for("message", check=check_author, timeout=600)
+        response_msg = await bot.wait_for("message", check=check_author, timeout=RATE_LIMIT_SECONDS * 15)
     except asyncio.TimeoutError:
         await ctx.send("⏰ Application timed out. Please try again with `s!partnership`.")
         return
@@ -911,8 +999,7 @@ async def partnership_command(ctx: commands.Context):
         await ctx.send("❌ Application cancelled.")
         return
 
-    fastpass_role = ctx.guild.get_role(FASTPASS_TEAM_ROLE_ID)
-    fastpass_ping = fastpass_role.mention if fastpass_role else "@Fastpass Team"
+    ping_text = get_ping_text(ctx.guild)
 
     submission_embed = discord.Embed(
         title="🤝 New Partnership Application",
@@ -928,10 +1015,10 @@ async def partnership_command(ctx: commands.Context):
         notify_channel_id=channel.id,
         form_content=form_content
     )
-    await ctx.send(f"{fastpass_ping} — New Partnership application!", embed=submission_embed, view=review_view)
+    await ctx.send(f"{ping_text} — New Partnership application!", embed=submission_embed, view=review_view)
     await ctx.send(
         f"✅ {applicant.mention} Your partnership application has been submitted! "
-        f"**Fastpass Team** will review it shortly."
+        f"**Management Team** and **Directive Team** have been notified."
     )
 
 # ───────────────────────────────────────────
