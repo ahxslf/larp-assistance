@@ -45,6 +45,7 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
         "first_message_done": False,
         "conversation": [],
         "summary_msg": None,
+        "last_summary_count": 0,
         "user": None,
     }
 
@@ -146,7 +147,20 @@ async def send_summary(
         return
 
     conversation = active_tickets[channel_id]["conversation"]
-    summary_text = await ai.generate_summary(conversation)
+    escalate, summary_text = await ai.generate_summary(conversation)
+
+    # If the AI decided this is a trivial ticket (just a question that was
+    # already answered, nothing for a human to do), don't post a summary and
+    # don't ping the staff team.
+    if not escalate:
+        print(f"[Ticket] #{channel.name}: trivial ticket, skipping summary/ping.")
+        return
+
+    # Don't spam: only post a new summary if something new actually happened
+    # since the last one we sent.
+    last_count = active_tickets[channel_id].get("last_summary_count", 0)
+    if version <= last_count:
+        return
 
     staff_role = guild.get_role(STAFF_PING_ID)
     staff_mention = staff_role.mention if staff_role else "@Staff"
@@ -159,17 +173,10 @@ async def send_summary(
         f"{'━' * 35}"
     )
 
-    existing_summary = active_tickets[channel_id]["summary_msg"]
-
-    if existing_summary is None:
-        summary_msg = await channel.send(full_message)
-        active_tickets[channel_id]["summary_msg"] = summary_msg
-    else:
-        try:
-            await existing_summary.edit(content=full_message)
-        except discord.NotFound:
-            summary_msg = await channel.send(full_message)
-            active_tickets[channel_id]["summary_msg"] = summary_msg
+    # Always post a NEW message instead of editing the previous summary.
+    summary_msg = await channel.send(full_message)
+    active_tickets[channel_id]["summary_msg"] = summary_msg
+    active_tickets[channel_id]["last_summary_count"] = version
 
 async def handle_followup_message(message: discord.Message, guild: discord.Guild):
     channel_id = message.channel.id
@@ -231,3 +238,136 @@ def is_first_message_done(channel_id: int) -> bool:
     if not ticket:
         return False
     return ticket.get("first_message_done", False)
+
+def is_known_ticket(channel_id: int) -> bool:
+    """True if the bot has any state for this ticket (active OR stopped)."""
+    return channel_id in active_tickets
+
+# ───────────────────────────────────────────
+# HISTORY REBUILD
+# ───────────────────────────────────────────
+
+# Prefix the bot prepends to its own messages, e.g. "**LARP | Assistance:** ..."
+_BOT_PREFIX = f"**{BOT_NAME}:**"
+
+def _looks_like_bot_message(content: str) -> bool:
+    return content.startswith(_BOT_PREFIX) or content.startswith(f"**{BOT_NAME}**")
+
+def _strip_bot_prefix(content: str) -> str:
+    if content.startswith(_BOT_PREFIX):
+        return content[len(_BOT_PREFIX):].strip()
+    return content.strip()
+
+async def rebuild_conversation_from_history(
+    bot,
+    channel: discord.TextChannel,
+    ticket_user: "discord.Member | None",
+    limit: int = 500,
+) -> list[dict]:
+    """
+    Read the channel's message history and reconstruct the AI conversation
+    list so the bot can continue with full context.
+
+    - Messages authored by the bot that start with the bot prefix  -> assistant
+    - Messages authored by the ticket user (no command prefix)     -> user
+    Other messages (staff chatter, system/embeds, commands) are ignored so
+    the AI context stays clean.
+    """
+    conversation: list[dict] = []
+
+    async for msg in channel.history(limit=limit, oldest_first=True):
+        content = (msg.content or "").strip()
+        if not content:
+            continue
+
+        if msg.author.id == bot.user.id:
+            # Only treat the bot's actual AI replies as assistant turns.
+            if _looks_like_bot_message(content):
+                conversation.append({
+                    "role": "assistant",
+                    "content": _strip_bot_prefix(content),
+                })
+            continue
+
+        if msg.author.bot:
+            continue
+
+        # Skip command messages
+        if is_command_message(content):
+            continue
+
+        # Only count the ticket owner's messages as user turns (if we know them)
+        if ticket_user and msg.author.id != ticket_user.id:
+            continue
+
+        conversation.append({"role": "user", "content": content})
+
+    return conversation
+
+async def resume_ticket(bot, channel: discord.TextChannel, guild: discord.Guild) -> dict:
+    """
+    `!start` — Re-enable the bot in a ticket that was previously disabled
+    (e.g. via !stop). The bot reads the full message history and rebuilds its
+    conversation context so it can keep answering with awareness of what was
+    already said.
+
+    Returns a status dict: {"status": "...", ...}
+    """
+    channel_id = channel.id
+    ticket = active_tickets.get(channel_id)
+
+    if ticket is None:
+        # No in-memory state at all — this is really a restart case.
+        return {"status": "no_state"}
+
+    if not ticket.get("stopped"):
+        return {"status": "already_active"}
+
+    # Determine / refresh the ticket owner
+    member = ticket.get("user")
+    if member is None:
+        username = extract_username(channel.name)
+        member = find_member_by_username(guild, username)
+        ticket["user"] = member
+
+    # Re-read history so context is fully up to date
+    conversation = await rebuild_conversation_from_history(bot, channel, member)
+    ticket["conversation"] = conversation
+
+    # Re-enable
+    ticket["stopped"] = False
+    ticket["waiting"] = False
+    ticket["first_message_done"] = True
+    # Allow new summaries again from this point
+    ticket["last_summary_count"] = 0
+
+    print(f"[Ticket] Resumed #{channel.name} ({len(conversation)} msgs in context).")
+    return {"status": "resumed", "messages": len(conversation)}
+
+async def restart_ticket(bot, channel: discord.TextChannel, guild: discord.Guild) -> dict:
+    """
+    `!restart` — Rebuild a ticket from scratch after the bot was restarted by
+    the host (maintenance / redeploy). In that situation the in-memory state is
+    gone and the ticket got silently deactivated. This recreates the ticket
+    state and reloads context from the channel history so the bot is live again.
+
+    Returns a status dict: {"status": "...", ...}
+    """
+    channel_id = channel.id
+    username = extract_username(channel.name)
+    member = find_member_by_username(guild, username)
+
+    conversation = await rebuild_conversation_from_history(bot, channel, member)
+
+    active_tickets[channel_id] = {
+        "stopped": False,
+        "waiting": False,
+        "first_message_done": True,
+        "conversation": conversation,
+        "summary_msg": None,
+        "last_summary_count": 0,
+        "user": member,
+    }
+
+    print(f"[Ticket] Restarted #{channel.name} ({len(conversation)} msgs in context).")
+    return {"status": "restarted", "messages": len(conversation)}
