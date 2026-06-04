@@ -2,6 +2,9 @@ import discord
 import asyncio
 import threading
 import io
+import os
+import json
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord.ext import commands
 from config import (
@@ -22,19 +25,134 @@ from handlers.ticket_handler import (
 )
 
 # ───────────────────────────────────────────
-# HTTP SERVER
+# HTTP SERVER  (health check + uptime panel + incidents API)
 # ───────────────────────────────────────────
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INCIDENTS_FILE = os.path.join(BASE_DIR, "incidents.json")
+INDEX_FILE = os.path.join(BASE_DIR, "index.html")
+
+# Lock so concurrent requests can't corrupt the JSON file.
+_incidents_lock = threading.Lock()
+MAX_INCIDENTS = 500
+
+
+def load_incidents() -> list:
+    """Read incidents.json; return [] if missing/corrupt."""
+    if not os.path.exists(INCIDENTS_FILE):
+        return []
+    try:
+        with open(INCIDENTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_incidents(incidents: list) -> None:
+    """Atomically write the incident list to incidents.json."""
+    tmp = INCIDENTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(incidents, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, INCIDENTS_FILE)
+
+
+def add_incident(incident: dict) -> dict:
+    """Append one incident (with id + server timestamp) and persist it."""
+    with _incidents_lock:
+        incidents = load_incidents()
+        incident["id"] = (incidents[-1]["id"] + 1) if incidents else 1
+        incident["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        incidents.append(incident)
+        if len(incidents) > MAX_INCIDENTS:
+            incidents = incidents[-MAX_INCIDENTS:]
+        save_incidents(incidents)
+        return incident
+
+
+class PanelHandler(BaseHTTPRequestHandler):
+    def _send(self, code: int, body: bytes, content_type: str):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(b"OK")
+        if body:
+            self.wfile.write(body)
+
+    def _send_json(self, code: int, obj):
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                   "application/json; charset=utf-8")
+
+    def do_OPTIONS(self):
+        self._send(204, b"", "text/plain")
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+
+        # Health check (kept so uptime monitors still see "OK").
+        if path == "/health":
+            self._send(200, b"OK", "text/plain")
+            return
+
+        # Incident list as JSON.
+        if path in ("/incidents.json", "/incidents"):
+            self._send_json(200, load_incidents())
+            return
+
+        # Serve the uptime panel at "/".
+        if path == "/":
+            if os.path.exists(INDEX_FILE):
+                with open(INDEX_FILE, "rb") as f:
+                    self._send(200, f.read(), "text/html; charset=utf-8")
+            else:
+                self._send(200, b"OK", "text/plain")
+            return
+
+        self._send(404, b"Not Found", "text/plain")
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path != "/incidents":
+            self._send(404, b"Not Found", "text/plain")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+
+        incident_type = payload.get("type")
+        if incident_type not in ("down", "up"):
+            self._send_json(400, {"error": "type must be 'down' or 'up'"})
+            return
+
+        incident = {
+            "type": incident_type,
+            "message": payload.get("message")
+            or ("Connection Lost" if incident_type == "down" else "System Restored"),
+            "date": payload.get("date"),
+            "time": payload.get("time"),
+            "duration": payload.get("duration"),  # optional, e.g. "5m 12s"
+        }
+
+        saved = add_incident(incident)
+        self._send_json(201, saved)
+
     def log_message(self, format, *args):
         pass
 
+
 def run_http_server():
-    server = HTTPServer(("0.0.0.0", 10000), HealthHandler)
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), PanelHandler)
+    print(f"🌐 HTTP server listening on port {port}")
     server.serve_forever()
 
 # ───────────────────────────────────────────
@@ -1099,5 +1217,4 @@ async def partnership_command(ctx: commands.Context):
 if __name__ == "__main__":
     t = threading.Thread(target=run_http_server, daemon=True)
     t.start()
-    print("🌐 HTTP health server started on port 10000")
     bot.run(DISCORD_TOKEN)
