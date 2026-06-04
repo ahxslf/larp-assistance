@@ -30,7 +30,16 @@ class AIHandler:
                 "A staff member will assist you shortly."
             )
 
-    async def generate_summary(self, conversation: list[dict]) -> str:
+    async def generate_summary(self, conversation: list[dict]) -> tuple[bool, str]:
+        """
+        Returns (escalate, summary_text).
+
+        escalate -> whether the staff team should be pinged / a summary posted.
+        summary_text -> the cleaned summary body (without the ESCALATE line).
+
+        On error we default to escalate=True so important tickets are never
+        silently dropped.
+        """
         try:
             conversation_text = "\n".join([
                 f"{msg['role'].upper()}: {msg['content']}"
@@ -42,8 +51,30 @@ class AIHandler:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.choices[0].message.content
+            raw = response.choices[0].message.content or ""
+
+            return self._parse_summary(raw)
 
         except Exception as e:
             print(f"[Summary Error] {e}")
-            return "**📋 Summary could not be generated automatically.**"
+            return True, "**📋 Summary could not be generated automatically.**"
+
+    @staticmethod
+    def _parse_summary(raw: str) -> tuple[bool, str]:
+        """Pull the ESCALATE decision off the top and return the rest as body."""
+        escalate = True  # safe default
+        body_lines: list[str] = []
+
+        for line in raw.splitlines():
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper.startswith("ESCALATE:"):
+                decision = upper.split(":", 1)[1].strip()
+                escalate = not decision.startswith("NO")
+                continue
+            body_lines.append(line)
+
+        body = "\n".join(body_lines).strip()
+        if not body:
+            body = "**📋 Summary could not be generated automatically.**"
+        return escalate, body
