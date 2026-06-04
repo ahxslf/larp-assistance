@@ -79,7 +79,7 @@ SERVER STAFF HIERARCHY (high → low)
 When listing ranks, ALWAYS present them in clearly separated sections as shown below.
 
 ── FOUNDERSHIP ──
-  • F-01 Salih (@salih.blox25)
+  • F-01 Salih (@salih.blox25) (Also known as Sal)
   • F-02 JSP (@jspnewaccount1)
   • CF-03 Nathan (@nxthanos)
   • CF-04 cryptic airplen (@k4rt1)
