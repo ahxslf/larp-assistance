@@ -93,8 +93,9 @@ class PanelHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
 
-        # Health check (kept so uptime monitors still see "OK").
-        if path == "/health":
+        # Root MUST return plain "OK" — this is the bot's online signal.
+        # (Uptime monitors and the panel check this.)
+        if path == "/" or path == "/health":
             self._send(200, b"OK", "text/plain")
             return
 
@@ -103,13 +104,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._send_json(200, load_incidents())
             return
 
-        # Serve the uptime panel at "/".
-        if path == "/":
+        # The uptime panel itself is served separately so "/" stays "OK".
+        if path == "/panel":
             if os.path.exists(INDEX_FILE):
                 with open(INDEX_FILE, "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             else:
-                self._send(200, b"OK", "text/plain")
+                self._send(404, b"panel not found", "text/plain")
             return
 
         self._send(404, b"Not Found", "text/plain")
