@@ -5,7 +5,7 @@ import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord.ext import commands
 from config import (
-    DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID,
+    DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID, AUTHORIZED_USER_ID,
     TRANSCRIPT_CHANNEL_ID, FOUNDERSHIP_TEAM_ROLE_ID, FASTPASS_TEAM_ROLE_ID,
     MANAGEMENT_TEAM_ROLE_ID, DIRECTIVE_TEAM_ROLE_ID,
     PARTNERSHIP_CHANNEL_ID,
@@ -17,6 +17,7 @@ from config import (
 from handlers.ticket_handler import (
     handle_new_ticket, handle_followup_message,
     stop_ticket, is_active_ticket, is_first_message_done,
+    resume_ticket, restart_ticket, is_known_ticket,
     active_tickets
 )
 
@@ -77,6 +78,10 @@ MOD_ROLE_IDS   = {ROLE_LEAD_MOD, ROLE_SENIOR_MOD, ROLE_MOD, ROLE_JUNIOR_MOD, ROL
 def is_staff(ctx: commands.Context) -> bool:
     staff_role = ctx.guild.get_role(STAFF_ROLE_ID)
     return staff_role in ctx.author.roles
+
+def is_authorized(ctx: commands.Context) -> bool:
+    """Authorized user ID OR anyone with the Staff role can pass."""
+    return ctx.author.id == AUTHORIZED_USER_ID or is_staff(ctx)
 
 def can_review_application(interaction: discord.Interaction) -> bool:
     """Management Team, Directive Team veya Foundership Team kontrolü."""
@@ -487,6 +492,65 @@ async def stop_command(ctx: commands.Context):
     stop_ticket(ctx.channel.id)
     await ctx.send("🛑 LARP | Assistance disabled.")
 
+@bot.command(name="start")
+async def start_command(ctx: commands.Context):
+    """Re-enable the bot in a ticket where it was previously disabled (!stop)."""
+    if not is_authorized(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+
+    if is_active_ticket(ctx.channel.id):
+        await ctx.send("ℹ️ LARP | Assistance is already active in this ticket.")
+        return
+
+    if not is_known_ticket(ctx.channel.id):
+        # No state at all (bot was restarted by the host) — point them to !restart.
+        await ctx.send(
+            "⚠️ I don't have any memory of this ticket (I may have been restarted "
+            "by the host). Use `!restart` to bring me back up to speed in this ticket."
+        )
+        return
+
+    async with ctx.channel.typing():
+        result = await resume_ticket(bot, ctx.channel, ctx.guild)
+
+    if result["status"] == "already_active":
+        await ctx.send("ℹ️ LARP | Assistance is already active in this ticket.")
+    elif result["status"] == "no_state":
+        await ctx.send(
+            "⚠️ I don't have any memory of this ticket. Use `!restart` instead."
+        )
+    else:
+        await ctx.send(
+            f"✅ **LARP | Assistance re-enabled.** I've read back through the "
+            f"conversation ({result['messages']} messages) and I'm ready to help again!"
+        )
+
+@bot.command(name="restart")
+async def restart_command(ctx: commands.Context):
+    """Rebuild a ticket after the bot was restarted by the host (maintenance)."""
+    if not is_authorized(ctx):
+        await ctx.send("❌ You don't have permission.")
+        return
+    if not is_ticket_channel(ctx):
+        await ctx.send("❌ This is not a ticket channel.")
+        return
+
+    if is_active_ticket(ctx.channel.id):
+        await ctx.send("ℹ️ LARP | Assistance is already active in this ticket.")
+        return
+
+    async with ctx.channel.typing():
+        result = await restart_ticket(bot, ctx.channel, ctx.guild)
+
+    await ctx.send(
+        f"🔄 **LARP | Assistance restarted in this ticket.** I've reloaded the "
+        f"conversation history ({result['messages']} messages) and I'm back online!"
+    )
+
 @bot.command(name="close")
 async def close_command(ctx: commands.Context):
     if not is_staff(ctx):
@@ -631,6 +695,11 @@ async def add_command(ctx: commands.Context, member: discord.Member = None):
 
 @bot.command(name="cmds")
 async def cmds_command(ctx: commands.Context):
+    # The authorized user OR anyone with the Staff role may use this command.
+    if not is_authorized(ctx):
+        await ctx.send("❌ You don't have permission to use this command.")
+        return
+
     embed = discord.Embed(
         title="📖 LARP | Assistance — Commands",
         color=discord.Color.blurple()
@@ -639,6 +708,8 @@ async def cmds_command(ctx: commands.Context):
         name="🎫 Ticket Commands (`!`)",
         value=(
             "`!stop` — Disable AI assistance in this ticket\n"
+            "`!start` — Re-enable AI in this ticket (reads full history)\n"
+            "`!restart` — Reload a ticket after a host restart/maintenance\n"
             "`!close` — Close & delete ticket (confirmation + transcript)\n"
             "`!claim` — Claim this ticket\n"
             "`!unclaim` — Unclaim this ticket\n"
