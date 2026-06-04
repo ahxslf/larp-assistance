@@ -183,12 +183,24 @@
     // ───────────────────────────────────────────
     // Config
     // ───────────────────────────────────────────
-    // Incidents are now stored on the server in incidents.json (no localStorage).
-    // The panel is served by the bot's own HTTP server, so we use relative paths.
-    const CHECK_URL      = "/health";          // bot health endpoint
-    const INCIDENTS_GET  = "/incidents.json";  // read stored incidents
-    const INCIDENTS_POST = "/incidents";       // record a new incident
-    const INTERVAL_MS    = 60000;              // check every 60s
+    // Incidents are stored on the server in incidents.json (no localStorage).
+    //
+    // BASE is the bot's HTTP server. When this panel is served by the bot
+    // itself, relative paths work. But if the panel is opened from anywhere
+    // else (GitHub Pages, a file:// path, another domain), relative paths would
+    // hit the WRONG host and the bot would always look "OFFLINE" even when it
+    // is online. So we hard-point BASE at the bot's public URL.
+    //
+    // If you self-host the panel on the SAME server as the bot, you can set
+    // BASE = "" to use relative paths instead.
+    const BASE = "https://larp-assistance.onrender.com";
+
+    // The bot's root URL returns plain "OK" when it's online. That's the
+    // whole check — if "/" says OK, the bot is ONLINE.
+    const CHECK_URL      = BASE + "/";               // bot online signal ("OK")
+    const INCIDENTS_GET  = BASE + "/incidents.json"; // read stored incidents
+    const INCIDENTS_POST = BASE + "/incidents";      // record a new incident
+    const INTERVAL_MS    = 60000;                     // check every 60s
 
     let checks = 0;
     let success = 0;
@@ -247,14 +259,23 @@
         const now = new Date();
         let isOnline = false;
 
+        // Give the host up to 45s to respond (Render free tier can be slow to
+        // wake from sleep). One slow reply shouldn't be marked as an outage.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 45000);
         try {
-            const res = await fetch(CHECK_URL + "?t=" + now.getTime(), { cache: "no-store" });
+            const res = await fetch(CHECK_URL + "?t=" + now.getTime(), {
+                cache: "no-store",
+                signal: controller.signal
+            });
             if (res.ok) {
                 const text = (await res.text()).toUpperCase();
                 if (text.includes("OK")) isOnline = true;
             }
         } catch (e) {
             isOnline = false;
+        } finally {
+            clearTimeout(timer);
         }
 
         checks++;
@@ -357,5 +378,5 @@
     })();
 </script>
 
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a0670f331f63b5a1',t:'MTc4MDU3NzM4NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a0670f331f63b5a1',t:'MTc4MDU3NzM4NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a06725dada5c87aa',t:'MTc4MDU3ODMxMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
