@@ -2,7 +2,7 @@ import asyncio
 import discord
 from config import (
     INITIAL_WAIT, USER_RESPONSE_WAIT,
-    STAFF_PING_ID, BOT_NAME
+    STAFF_PING_ID, STAFF_ROLE_ID, BOT_NAME
 )
 from handlers.ai_handler import AIHandler
 
@@ -13,7 +13,7 @@ active_tickets: dict[int, dict] = {}
 # Komut prefixleri — bu ile başlayan mesajlar AI'ya gitmesin
 COMMAND_PREFIXES = ("!", "s!")
 
-def extract_username(channel_name: str) -> str:
+def extract_username_from_channel_name(channel_name: str) -> str:
     parts = channel_name.split("-", 1)
     return parts[1] if len(parts) > 1 else channel_name
 
@@ -28,6 +28,73 @@ def find_member_by_username(guild: discord.Guild, username: str) -> discord.Memb
             return member
     return None
 
+def _dedupe_members(members: list[discord.Member]) -> list[discord.Member]:
+    unique: dict[int, discord.Member] = {}
+    for member in members:
+        unique[member.id] = member
+    return list(unique.values())
+
+def infer_ticket_owner(channel: discord.TextChannel, guild: discord.Guild) -> discord.Member | None:
+    """
+    Try to determine the ticket owner without relying on the channel name.
+
+    Strategy:
+    1) Prefer explicit member overwrites on the channel.
+    2) Prefer non-staff members among those explicit overwrites.
+    3) Fall back to broader permission checks.
+    4) Only if needed, fall back to the old channel-name heuristic.
+    """
+    staff_role = guild.get_role(STAFF_ROLE_ID)
+
+    explicit_members: list[discord.Member] = []
+    for target, overwrite in channel.overwrites.items():
+        if not isinstance(target, discord.Member):
+            continue
+        if target.bot:
+            continue
+        if (
+            overwrite.view_channel is True
+            or overwrite.read_messages is True
+            or overwrite.send_messages is True
+        ):
+            explicit_members.append(target)
+
+    explicit_members = _dedupe_members(explicit_members)
+    non_staff_explicit = [
+        member for member in explicit_members
+        if not staff_role or staff_role not in member.roles
+    ]
+
+    if len(non_staff_explicit) == 1:
+        return non_staff_explicit[0]
+    if len(explicit_members) == 1:
+        return explicit_members[0]
+
+    accessible_members: list[discord.Member] = []
+    for member in guild.members:
+        if member.bot:
+            continue
+
+        perms = channel.permissions_for(member)
+        can_view = getattr(perms, "view_channel", getattr(perms, "read_messages", False))
+        can_send = getattr(perms, "send_messages", False)
+        if can_view and can_send:
+            accessible_members.append(member)
+
+    accessible_members = _dedupe_members(accessible_members)
+    non_staff_accessible = [
+        member for member in accessible_members
+        if not staff_role or staff_role not in member.roles
+    ]
+
+    if len(non_staff_accessible) == 1:
+        return non_staff_accessible[0]
+    if len(accessible_members) == 1:
+        return accessible_members[0]
+
+    username = extract_username_from_channel_name(channel.name)
+    return find_member_by_username(guild, username)
+
 def is_command_message(content: str) -> bool:
     """Mesaj bir komutsa True döner — AI buna cevap vermez."""
     for prefix in COMMAND_PREFIXES:
@@ -37,7 +104,6 @@ def is_command_message(content: str) -> bool:
 
 async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Guild):
     channel_id = channel.id
-    username = extract_username(channel.name)
 
     active_tickets[channel_id] = {
         "stopped": False,
@@ -49,26 +115,28 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
         "user": None,
     }
 
-    print(f"[Ticket] New ticket: #{channel.name} | Username: {username}")
-
     await asyncio.sleep(INITIAL_WAIT)
 
     if active_tickets[channel_id]["stopped"]:
         return
 
-    member = find_member_by_username(guild, username)
+    member = infer_ticket_owner(channel, guild)
     active_tickets[channel_id]["user"] = member
 
-    if member:
-        ping_text = member.mention
-    else:
-        ping_text = f"**{username}**"
+    owner_label = member.display_name if member else "unknown"
+    print(f"[Ticket] New ticket: #{channel.name} | Owner: {owner_label}")
+
+    intro = (
+        f"{member.mention} 👋 Hello! I'm **{BOT_NAME}**, your automated support assistant.\n\n"
+        if member else
+        f"👋 Hello! I'm **{BOT_NAME}**, your automated support assistant.\n\n"
+    )
 
     await channel.send(
-        f"{ping_text} 👋 Hello! I'm **{BOT_NAME}**, your automated support assistant.\n\n"
-        f"Please describe your issue and I'll do my best to help you right away!\n"
-        f"*(You have **{USER_RESPONSE_WAIT} seconds** to send your first message. "
-        f"If you need more time, don't worry — I'll wait for you!)*"
+        intro
+        + f"Please describe your issue and I'll do my best to help you right away!\n"
+        + f"*(You have **{USER_RESPONSE_WAIT} seconds** to send your first message. "
+        + f"If you need more time, don't worry — I'll wait for you!)*"
     )
 
     def check(m: discord.Message) -> bool:
@@ -81,8 +149,10 @@ async def handle_new_ticket(bot, channel: discord.TextChannel, guild: discord.Gu
         # Komut mesajlarını yoksay
         if is_command_message(m.content):
             return False
-        if member:
-            return m.author.id == member.id
+
+        ticket_user = active_tickets.get(channel_id, {}).get("user")
+        if ticket_user:
+            return m.author.id == ticket_user.id
         return True
 
     first_msg = None
@@ -326,8 +396,7 @@ async def resume_ticket(bot, channel: discord.TextChannel, guild: discord.Guild)
     # Determine / refresh the ticket owner
     member = ticket.get("user")
     if member is None:
-        username = extract_username(channel.name)
-        member = find_member_by_username(guild, username)
+        member = infer_ticket_owner(channel, guild)
         ticket["user"] = member
 
     # Re-read history so context is fully up to date
@@ -354,8 +423,7 @@ async def restart_ticket(bot, channel: discord.TextChannel, guild: discord.Guild
     Returns a status dict: {"status": "...", ...}
     """
     channel_id = channel.id
-    username = extract_username(channel.name)
-    member = find_member_by_username(guild, username)
+    member = infer_ticket_owner(channel, guild)
 
     conversation = await rebuild_conversation_from_history(bot, channel, member)
 
