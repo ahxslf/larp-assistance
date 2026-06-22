@@ -776,8 +776,8 @@ async def rename_command(ctx: commands.Context, *, new_name: str = None):
         await ctx.send("❌ Usage: `!rename <new name>`")
         return
     safe_name = new_name.lower().replace(" ", "-")
-    await ctx.channel.edit(name=f"support-{safe_name}")
-    await ctx.send(f"✅ Channel renamed to `support-{safe_name}`.")
+    await ctx.channel.edit(name=safe_name)
+    await ctx.send(f"✅ Channel renamed to `{safe_name}`.")
 
 @bot.command(name="remove")
 async def remove_command(ctx: commands.Context, member: discord.Member = None):
