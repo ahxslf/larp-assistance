@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from discord.ext import commands
 from config import (
-    DISCORD_TOKEN, TICKET_CATEGORY_ID, STAFF_ROLE_ID, AUTHORIZED_USER_ID,
+    DISCORD_TOKEN, TICKET_CATEGORY_IDS, STAFF_ROLE_ID, AUTHORIZED_USER_ID,
     TRANSCRIPT_CHANNEL_ID, FOUNDERSHIP_TEAM_ROLE_ID, FASTPASS_TEAM_ROLE_ID,
     MANAGEMENT_TEAM_ROLE_ID, DIRECTIVE_TEAM_ROLE_ID,
     PARTNERSHIP_CHANNEL_ID,
@@ -215,8 +215,7 @@ def can_review_application(interaction: discord.Interaction) -> bool:
 def is_ticket_channel(ctx: commands.Context) -> bool:
     return (
         ctx.channel.category is not None
-        and ctx.channel.category.id == TICKET_CATEGORY_ID
-        and ctx.channel.name.startswith("support-")
+        and ctx.channel.category.id in TICKET_CATEGORY_IDS
     )
 
 def get_ping_text(guild: discord.Guild) -> str:
@@ -542,18 +541,19 @@ class PartnershipReviewView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Bot online: {bot.user}")
-    print(f"📂 Watching category ID: {TICKET_CATEGORY_ID}")
+    print(f"📂 Watching ticket categories: {', '.join(map(str, TICKET_CATEGORY_IDS))}")
 
 @bot.event
 async def on_guild_channel_create(channel):
     if not isinstance(channel, discord.TextChannel):
         return
-    if not channel.category or channel.category.id != TICKET_CATEGORY_ID:
+
+    if not channel.category or channel.category.id not in TICKET_CATEGORY_IDS:
         return
-    if not channel.name.startswith("support-"):
-        return
+
     print(f"[+] Ticket detected: #{channel.name}")
     asyncio.create_task(handle_new_ticket(bot, channel, channel.guild))
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -567,12 +567,11 @@ async def on_message(message: discord.Message):
     if message.content.startswith("!") or message.content.startswith("s!"):
         return
 
-    if not message.channel.category:
-        return
-    if message.channel.category.id != TICKET_CATEGORY_ID:
-        return
-    if not message.channel.name.startswith("support-"):
-        return
+if not message.channel.category:
+    return
+if message.channel.category.id not in TICKET_CATEGORY_IDS:
+    return
+
 
     channel_id = message.channel.id
     if not is_active_ticket(channel_id):
