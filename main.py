@@ -567,11 +567,10 @@ async def on_message(message: discord.Message):
     if message.content.startswith("!") or message.content.startswith("s!"):
         return
 
-if not message.channel.category:
-    return
-if message.channel.category.id not in TICKET_CATEGORY_IDS:
-    return
-
+    if not message.channel.category:
+        return
+    if message.channel.category.id not in TICKET_CATEGORY_IDS:
+        return
 
     channel_id = message.channel.id
     if not is_active_ticket(channel_id):
